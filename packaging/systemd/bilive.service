@@ -1,0 +1,24 @@
+[Unit]
+Description=bilive local live management service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bilive serve --listen 127.0.0.1:22333 --web-dir /opt/bilive/web
+Restart=on-failure
+RestartSec=5s
+DynamicUser=yes
+StateDirectory=bilive
+CacheDirectory=bilive
+WorkingDirectory=/opt/bilive
+Environment=RUST_LOG=bilive=info,bilive_server=info,bilive_core=info,tower_http=info
+Environment=BILIVE_STATE_DIR=/var/lib/bilive
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/bilive /var/cache/bilive
+
+[Install]
+WantedBy=multi-user.target

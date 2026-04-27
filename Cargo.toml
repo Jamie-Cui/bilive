@@ -1,0 +1,36 @@
+[workspace]
+members = [
+  "crates/bilive-cli",
+  "crates/bilive-core",
+  "crates/bilive-server",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jamie/bilive"
+rust-version = "1.90"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+axum = { version = "0.8.7", features = ["ws"] }
+brotli = "8.0.2"
+bytes = "1.11.0"
+clap = { version = "4.5.54", features = ["derive", "env"] }
+flate2 = "1.1.9"
+futures-util = "0.3.31"
+md5 = "0.8.0"
+mime_guess = "2.0.5"
+qrcode = "0.14.1"
+reqwest = { version = "0.12.26", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_urlencoded = "0.7.1"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.17", features = ["codec"] }
+tower-http = { version = "0.6.7", features = ["fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+url = "2.5.8"

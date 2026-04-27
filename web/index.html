@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bilive</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">bi</div>
+          <div>
+            <h1>bilive</h1>
+            <span>本地直播后台</span>
+          </div>
+        </div>
+
+        <dl class="status-list">
+          <div>
+            <dt>Service</dt>
+            <dd id="service-status">检测中</dd>
+          </div>
+          <div>
+            <dt>Account</dt>
+            <dd id="auth-status">未登录</dd>
+          </div>
+          <div>
+            <dt>Danmu</dt>
+            <dd id="danmu-status">未连接</dd>
+          </div>
+          <div>
+            <dt>Events</dt>
+            <dd id="event-status">未连接</dd>
+          </div>
+        </dl>
+
+        <nav class="nav-tabs" aria-label="后台导航">
+          <button class="active" data-tab="account" type="button">账号</button>
+          <button data-tab="stream" type="button">直播</button>
+          <button data-tab="comments" type="button">弹幕</button>
+          <button data-tab="manager" type="button">管理</button>
+          <button data-tab="settings" type="button">设置</button>
+        </nav>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="page-title">账号</h2>
+            <p id="config-path">加载配置中</p>
+          </div>
+          <div class="topbar-actions">
+            <button class="ghost-button" id="refresh" type="button">刷新</button>
+            <button class="danger-button" id="logout" type="button" disabled>退出</button>
+          </div>
+        </header>
+
+        <section class="tab-panel active" id="tab-account">
+          <div class="two-column">
+            <section class="panel">
+              <h3>扫码登录</h3>
+              <div class="qr-box" id="qr-box">未生成</div>
+              <div class="button-row">
+                <button class="primary-button" id="qr-generate" type="button">生成二维码</button>
+                <button class="ghost-button" id="qr-stop" type="button" disabled>停止轮询</button>
+              </div>
+              <p class="hint" id="qr-status">使用哔哩哔哩 App 扫码确认后会自动初始化。</p>
+            </section>
+
+            <section class="panel">
+              <h3>Cookie 登录</h3>
+              <label>
+                Session Cookie
+                <textarea id="cookie-input" rows="7" placeholder="粘贴包含 SESSDATA 和 bili_jct 的 Cookie"></textarea>
+              </label>
+              <button class="primary-button" id="cookie-login" type="button">验证并登录</button>
+              <p class="hint">Cookie 只写入本机配置文件，不会显示在页面响应中。</p>
+            </section>
+          </div>
+
+          <section class="panel">
+            <h3>账号信息</h3>
+            <div class="profile" id="profile">未登录</div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="tab-stream">
+          <section class="panel">
+            <h3>直播间设置</h3>
+            <div class="form-grid">
+              <label>
+                标题
+                <input id="room-title" />
+              </label>
+              <label>
+                父分区
+                <select id="category-id"></select>
+              </label>
+              <label>
+                子分区
+                <select id="area-id"></select>
+              </label>
+            </div>
+            <div class="button-row">
+              <button class="ghost-button" id="bootstrap" type="button">重新初始化</button>
+              <button class="ghost-button" id="save-title" type="button">更新标题</button>
+              <button class="ghost-button" id="save-area" type="button">更新分区</button>
+              <button class="primary-button" id="start-live" type="button">开始直播</button>
+              <button class="danger-button" id="stop-live" type="button">停止直播</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h3>推流凭证</h3>
+            <div class="stream-list" id="stream-list">暂无推流凭证</div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="tab-comments">
+          <section class="panel">
+            <h3>弹幕连接</h3>
+            <div class="form-grid">
+              <label>
+                房间 ID
+                <input id="room-id" inputmode="numeric" />
+              </label>
+              <label>
+                UID
+                <input id="uid" inputmode="numeric" />
+              </label>
+              <label>
+                Host
+                <input id="host" value="broadcastlv.chat.bilibili.com" />
+              </label>
+              <label>
+                Port
+                <input id="port" inputmode="numeric" value="2243" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button class="primary-button" id="connect-danmu" type="button">连接弹幕</button>
+              <button class="danger-button" id="disconnect-danmu" type="button">断开</button>
+              <button class="ghost-button" id="refresh-danmu-token" type="button">刷新弹幕 Token</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h3>发送弹幕</h3>
+            <div class="inline-form">
+              <input id="comment-message" placeholder="输入弹幕内容" />
+              <button class="primary-button" id="send-comment" type="button">发送</button>
+            </div>
+          </section>
+
+          <section class="event-feed" aria-label="事件流">
+            <div class="feed-header">
+              <h3>事件流</h3>
+              <div class="button-row">
+                <button class="ghost-button compact" id="load-rank" type="button">在线榜单</button>
+                <button class="ghost-button compact" id="clear-logs" type="button">清空</button>
+              </div>
+            </div>
+            <div class="log-list" id="log-list">
+              <div class="empty-state">暂无事件</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="tab-manager">
+          <div class="two-column">
+            <section class="panel">
+              <h3>房管</h3>
+              <div class="inline-form">
+                <input id="admin-uid" placeholder="UID" />
+                <button class="primary-button" id="add-admin" type="button">添加</button>
+                <button class="danger-button" id="delete-admin" type="button">移除</button>
+              </div>
+              <button class="ghost-button" id="load-admins" type="button">加载房管列表</button>
+            </section>
+
+            <section class="panel">
+              <h3>用户禁言</h3>
+              <div class="inline-form">
+                <input id="silent-uid" placeholder="UID" />
+                <input id="silent-hour" placeholder="小时" value="1" />
+                <button class="primary-button" id="add-silent" type="button">禁言</button>
+                <button class="danger-button" id="delete-silent" type="button">解除</button>
+              </div>
+              <div class="inline-form">
+                <input id="search-user" placeholder="搜索昵称或 UID" />
+                <button class="ghost-button" id="search-user-button" type="button">搜索用户</button>
+              </div>
+              <button class="ghost-button" id="load-silent" type="button">加载禁言列表</button>
+            </section>
+
+            <section class="panel">
+              <h3>全局禁言</h3>
+              <div class="form-grid">
+                <label>
+                  类型
+                  <select id="room-silent-type">
+                    <option value="off">关闭</option>
+                    <option value="wealth">财富等级</option>
+                    <option value="medal">粉丝勋章</option>
+                    <option value="member">正式会员</option>
+                  </select>
+                </label>
+                <label>
+                  等级
+                  <input id="room-silent-level" inputmode="numeric" value="1" />
+                </label>
+                <label>
+                  分钟
+                  <input id="room-silent-minute" inputmode="numeric" value="0" />
+                </label>
+              </div>
+              <div class="button-row">
+                <button class="primary-button" id="set-room-silent" type="button">设置</button>
+                <button class="ghost-button" id="load-room-silent" type="button">读取</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h3>屏蔽词</h3>
+              <div class="inline-form">
+                <input id="blocked-keyword" placeholder="关键词" />
+                <button class="primary-button" id="add-blocked" type="button">添加</button>
+                <button class="danger-button" id="delete-blocked" type="button">删除</button>
+              </div>
+              <button class="ghost-button" id="load-blocked" type="button">加载屏蔽词</button>
+            </section>
+          </div>
+          <section class="panel">
+            <h3>管理结果</h3>
+            <pre class="raw-output" id="manager-output">暂无数据</pre>
+          </section>
+        </section>
+
+        <section class="tab-panel" id="tab-settings">
+          <section class="panel">
+            <h3>本地设置</h3>
+            <div class="form-grid">
+              <label>
+                主题
+                <select id="theme">
+                  <option value="light">light</option>
+                  <option value="dark">dark</option>
+                </select>
+              </label>
+            </div>
+            <div class="button-row">
+              <button class="primary-button" id="save-config" type="button">保存设置</button>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div class="toast-region" id="toasts" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

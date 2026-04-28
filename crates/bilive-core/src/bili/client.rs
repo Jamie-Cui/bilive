@@ -112,6 +112,7 @@ impl BiliClient {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT_VALUE)
             .redirect(reqwest::redirect::Policy::limited(10))
+            .no_proxy()
             .build()?;
         Ok(Self { http, config })
     }

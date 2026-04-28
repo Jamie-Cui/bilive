@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Jamie Cui
+// Author: Jamie Cui
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Jamie Cui
+// Author: Jamie Cui
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use super::protocol::{Message, Opcode, ProtocolCodec, ProtocolVersion, parse_header};
 use super::utils::{brotli_decode, zlib_decode};
 use crate::{ConnectionStatus, Event};

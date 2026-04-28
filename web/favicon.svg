@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="bilive favicon">
+  <rect width="64" height="64" rx="14" fill="#080b12"/>
+  <rect x="10" y="10" width="44" height="44" rx="9" fill="#ff6fb1" stroke="#ffd6ea" stroke-width="2"/>
+  <text x="32" y="43" font-family="'IBM Plex Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace" font-size="32" font-weight="700" text-anchor="middle" fill="#ffffff">B</text>
+  <rect x="42" y="43" width="7" height="3" rx="1.5" fill="#2b1020"/>
+</svg>

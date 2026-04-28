@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Jamie Cui
+// Author: Jamie Cui
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use super::{app_sign, wbi_sign};
 use crate::config::{AppConfig, AppCookie, ConfigStore, StreamCredential, parse_cookie_header};
 use reqwest::{

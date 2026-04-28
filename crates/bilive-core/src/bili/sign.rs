@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Jamie Cui
+// Author: Jamie Cui
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::form_urlencoded::Serializer;
 

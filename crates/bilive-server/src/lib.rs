@@ -18,12 +18,22 @@ use futures_util::{SinkExt, StreamExt};
 use qrcode::{QrCode as SvgQrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+
+const TEST_STREAM_DURATION_SECONDS: u64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -79,6 +89,12 @@ struct TitleRequest {
 #[derive(Debug, Deserialize)]
 struct AreaRequest {
     area_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestStreamRequest {
+    #[serde(default)]
+    index: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +175,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/live/title", post(update_title))
         .route("/api/live/area", post(update_area))
         .route("/api/live/start", post(start_live))
+        .route("/api/live/test-stream", post(test_stream))
         .route("/api/live/stop", post(stop_live))
         .route("/api/live/comment", post(send_comment))
         .route("/api/live/contribution-rank", get(contribution_rank))
@@ -262,13 +279,7 @@ async fn auth_logout(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
 
 async fn qrcode_generate(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let qr = state.bili.qrcode_generate().await?;
-    let svg = SvgQrCode::new(qr.url.as_bytes())
-        .map_err(|_| ApiError::bad_request("failed to render QR code"))?
-        .render::<svg::Color>()
-        .min_dimensions(220, 220)
-        .dark_color(svg::Color("#111827"))
-        .light_color(svg::Color("#ffffff"))
-        .build();
+    let svg = render_qr_svg(&qr.url)?;
     Ok(Json(json!({
         "url": qr.url,
         "qrcode_key": qr.qrcode_key,
@@ -337,7 +348,130 @@ async fn update_area(
 }
 
 async fn start_live(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(state.bili.start_live().await?))
+    let mut response = state.bili.start_live().await?;
+    if requires_face_auth(&response) {
+        let config = state.bili.config().await;
+        if config.uid != 0 {
+            let url = face_auth_url(config.uid);
+            let svg = render_qr_svg(&url)?;
+            if let Some(object) = response.as_object_mut() {
+                object.insert("face_auth".to_string(), json!({ "url": url, "svg": svg }));
+            }
+        }
+    }
+    Ok(Json(response))
+}
+
+async fn test_stream(
+    State(state): State<AppState>,
+    Json(request): Json<TestStreamRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.bili.config().await;
+    if !config.is_open_live {
+        return Err(ApiError::bad_request("请先开播后再测试推流"));
+    }
+
+    let stream = config
+        .streams
+        .get(request.index)
+        .ok_or_else(|| ApiError::bad_request("没有可用的推流凭证"))?;
+    let url = stream_url(&stream.address, &stream.key);
+    if url.is_empty() {
+        return Err(ApiError::bad_request("推流地址为空"));
+    }
+
+    let room_info = state.bili.room_info(config.room_id).await?;
+    if room_info.get("live_status").and_then(Value::as_i64) != Some(1) {
+        return Err(ApiError::bad_request(
+            "B 站公开状态未开播，请先点击开始直播重新获取推流凭证",
+        ));
+    }
+
+    let ffmpeg = std::env::var("BILIVE_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+    let started = Instant::now();
+    let child = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-t",
+            "5",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "2500k",
+            "-maxrate",
+            "2500k",
+            "-bufsize",
+            "5000k",
+            "-g",
+            "60",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-flvflags",
+            "no_duration_filesize",
+            "-f",
+            "flv",
+        ])
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| ApiError::bad_request(format!("启动 ffmpeg 失败: {error}")))?;
+
+    let output =
+        match tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await {
+            Ok(result) => result
+                .map_err(|error| ApiError::bad_request(format!("等待 ffmpeg 失败: {error}")))?,
+            Err(_) => return Err(ApiError::bad_request("测试推流超时")),
+        };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rtmp_close_warning(&stderr, started.elapsed()) {
+            return Ok(Json(json!({
+                "ok": true,
+                "message": "测试推流完成，ffmpeg 收尾阶段收到 RTMP 断开警告",
+                "duration_seconds": TEST_STREAM_DURATION_SECONDS,
+                "stream_type": stream.kind,
+                "warning": sanitize_ffmpeg_error(&stderr, &stream.key),
+            })));
+        }
+
+        return Err(ApiError::bad_request(format!(
+            "测试推流失败，ffmpeg 退出状态: {}; {}",
+            output.status,
+            sanitize_ffmpeg_error(&stderr, &stream.key)
+        )));
+    }
+
+    Ok(Json(json!({
+        "ok": true,
+        "message": "测试推流完成",
+        "duration_seconds": TEST_STREAM_DURATION_SECONDS,
+        "stream_type": stream.kind,
+    })))
 }
 
 async fn stop_live(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -564,6 +698,110 @@ fn public_config(config: bilive_core::AppConfig) -> Value {
         "is_open_live": config.is_open_live,
         "streams": config.streams,
     })
+}
+
+fn render_qr_svg(value: &str) -> Result<String, ApiError> {
+    Ok(SvgQrCode::new(value.as_bytes())
+        .map_err(|_| ApiError::bad_request("failed to render QR code"))?
+        .render::<svg::Color>()
+        .min_dimensions(220, 220)
+        .dark_color(svg::Color("#111827"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}
+
+fn requires_face_auth(response: &Value) -> bool {
+    response.get("code").and_then(Value::as_i64) == Some(60024)
+        || response_text_contains(response, "身份验证")
+        || response_text_contains(response, "人脸")
+}
+
+fn response_text_contains(response: &Value, needle: &str) -> bool {
+    ["message", "msg"].iter().any(|key| {
+        response
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains(needle))
+    })
+}
+
+fn face_auth_url(uid: u64) -> String {
+    format!(
+        "https://www.bilibili.com/blackboard/live/face-auth-middle.html?source_event=400&mid={uid}"
+    )
+}
+
+fn stream_url(address: &str, key: &str) -> String {
+    if address.is_empty() || key.is_empty() {
+        return format!("{address}{key}");
+    }
+    if key.starts_with('?') || key.starts_with('&') {
+        return format!("{address}{key}");
+    }
+    format!(
+        "{}{slash}{key}",
+        address,
+        slash = if address.ends_with('/') { "" } else { "/" }
+    )
+}
+
+fn sanitize_ffmpeg_error(stderr: &str, stream_key: &str) -> String {
+    let text = stderr.trim();
+    if text.is_empty() {
+        return "ffmpeg 没有返回错误详情".to_string();
+    }
+    let sanitized = text.replace(stream_key, "<stream-key>");
+    let sanitized = sanitized
+        .lines()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    sanitized.chars().take(1200).collect()
+}
+
+fn is_rtmp_close_warning(stderr: &str, elapsed: Duration) -> bool {
+    elapsed >= Duration::from_secs(TEST_STREAM_DURATION_SECONDS.saturating_sub(1))
+        && stderr.contains("Broken pipe")
+        && (stderr.contains("Error writing trailer") || stderr.contains("Error closing file"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_bilibili_query_style_stream_url() {
+        let url = stream_url(
+            "rtmp://live-push.bilivideo.com/live-bvc/",
+            "?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2",
+        );
+
+        assert_eq!(
+            url,
+            "rtmp://live-push.bilivideo.com/live-bvc/?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2"
+        );
+    }
+
+    #[test]
+    fn treats_late_trailer_broken_pipe_as_close_warning() {
+        let stderr = "[out#0/flv] Error writing trailer: Broken pipe\n[out#0/flv] Error closing file: Broken pipe";
+
+        assert!(is_rtmp_close_warning(
+            stderr,
+            Duration::from_secs(TEST_STREAM_DURATION_SECONDS)
+        ));
+    }
+
+    #[test]
+    fn rejects_immediate_broken_pipe_as_close_warning() {
+        let stderr = "[out#0/flv] Error writing trailer: Broken pipe";
+
+        assert!(!is_rtmp_close_warning(stderr, Duration::from_secs(1)));
+    }
 }
 
 impl ApiError {

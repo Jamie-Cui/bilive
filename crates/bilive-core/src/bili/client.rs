@@ -6,7 +6,10 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use url::form_urlencoded::Serializer;
 
@@ -104,12 +107,6 @@ pub struct DanmuInfo {
     token: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct LiveVersion {
-    curr_version: String,
-    build: u64,
-}
-
 impl BiliClient {
     pub fn new(config: ConfigStore) -> BiliResult<Self> {
         let http = reqwest::Client::builder()
@@ -203,6 +200,16 @@ impl BiliClient {
         self.get_data(
             LIVE_BASE,
             &format!("/room/v2/Room/room_id_by_uid?uid={uid}"),
+            Some(LIVE_BASE),
+            None,
+        )
+        .await
+    }
+
+    pub async fn room_info(&self, room_id: u64) -> BiliResult<Value> {
+        self.get_data(
+            LIVE_BASE,
+            &format!("/room/v1/Room/get_info?room_id={room_id}"),
             Some(LIVE_BASE),
             None,
         )
@@ -326,27 +333,21 @@ impl BiliClient {
     pub async fn start_live(&self) -> BiliResult<Value> {
         let config = self.config.get().await;
         let csrf = csrf(&config)?;
-        let version: LiveVersion = serde_json::from_value(self.live_version().await?)
-            .map_err(|_| BiliError::InvalidResponse("live version"))?;
         let response = self
             .send(BiliRequest {
                 base_url: LIVE_BASE,
                 endpoint: "/room/v1/Room/startLive".to_string(),
                 method: Method::POST,
-                origin: Some(LIVE_BASE),
-                referer: None,
+                origin: Some(LIVE_ORIGIN),
+                referer: Some("https://live.bilibili.com/"),
                 form: vec![
                     ("room_id", config.room_id.to_string()),
                     ("platform", "pc_link".to_string()),
-                    ("backup_stream", "0".to_string()),
                     ("csrf", csrf.clone()),
                     ("csrf_token", csrf),
                     ("area_v2", config.area_id),
-                    ("version", version.curr_version),
-                    ("build", version.build.to_string()),
-                    ("ts", unix_millis().to_string()),
                 ],
-                app_sign: true,
+                app_sign: false,
                 raw: true,
             })
             .await?;
@@ -868,22 +869,65 @@ fn parse_set_cookie(value: &str) -> Option<AppCookie> {
 
 fn parse_streams(data: &Value) -> Vec<StreamCredential> {
     let mut streams = Vec::new();
+    let mut seen = HashSet::new();
+    let mut rtmp = 0;
+    let mut srt = 0;
 
-    if let Some(rtmp) = data.get("rtmp") {
+    fn push_stream(
+        streams: &mut Vec<StreamCredential>,
+        seen: &mut HashSet<(String, String)>,
+        rtmp: &mut usize,
+        srt: &mut usize,
+        protocol: &str,
+        address: &str,
+        key: &str,
+    ) {
+        let address = address.trim();
+        let key = key.trim();
+        if address.is_empty() || key.is_empty() {
+            return;
+        }
+
+        if !seen.insert((address.to_string(), key.to_string())) {
+            return;
+        }
+
+        let kind = match protocol {
+            "rtmp" => {
+                *rtmp += 1;
+                format!("rtmp-{}", *rtmp)
+            }
+            "srt" => {
+                *srt += 1;
+                format!("srt-{}", *srt)
+            }
+            _ => return,
+        };
+
+        streams.push(StreamCredential {
+            kind,
+            address: address.to_string(),
+            key: key.to_string(),
+        });
+    }
+
+    if let Some(data_rtmp) = data.get("rtmp") {
         if let (Some(address), Some(key)) = (
-            rtmp.get("addr").and_then(Value::as_str),
-            rtmp.get("code").and_then(Value::as_str),
+            data_rtmp.get("addr").and_then(Value::as_str),
+            data_rtmp.get("code").and_then(Value::as_str),
         ) {
-            streams.push(StreamCredential {
-                kind: "rtmp-1".to_string(),
-                address: address.to_string(),
-                key: key.to_string(),
-            });
+            push_stream(
+                &mut streams,
+                &mut seen,
+                &mut rtmp,
+                &mut srt,
+                "rtmp",
+                address,
+                key,
+            );
         }
     }
 
-    let mut rtmp = 1;
-    let mut srt = 0;
     if let Some(protocols) = data.get("protocols").and_then(Value::as_array) {
         for protocol in protocols {
             let name = protocol
@@ -902,29 +946,18 @@ fn parse_streams(data: &Value) -> Vec<StreamCredential> {
                 continue;
             }
 
-            match name {
-                "rtmp" => {
-                    rtmp += 1;
-                    streams.push(StreamCredential {
-                        kind: format!("rtmp-{rtmp}"),
-                        address: address.to_string(),
-                        key: key.to_string(),
-                    });
-                }
-                "srt" => {
-                    srt += 1;
-                    streams.push(StreamCredential {
-                        kind: format!("srt-{srt}"),
-                        address: address.to_string(),
-                        key: key.to_string(),
-                    });
-                }
-                _ => {}
-            }
+            push_stream(
+                &mut streams,
+                &mut seen,
+                &mut rtmp,
+                &mut srt,
+                name,
+                address,
+                key,
+            );
         }
     }
 
-    streams.sort_by(|left, right| left.kind.cmp(&right.kind));
     streams
 }
 
@@ -946,6 +979,63 @@ fn encode_component(value: &str) -> String {
 fn extract_key(value: &str) -> String {
     let filename = value.rsplit('/').next().unwrap_or(value);
     filename.split('.').next().unwrap_or(filename).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_unique_stream_credentials() {
+        let data = json!({
+            "rtmp": {
+                "addr": "rtmp://live-push.bilivideo.com/live-bvc/",
+                "code": "?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2"
+            },
+            "protocols": [
+                {
+                    "protocol": "rtmp",
+                    "addr": "rtmp://live-push.bilivideo.com/live-bvc/",
+                    "code": "?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2"
+                }
+            ]
+        });
+
+        let streams = parse_streams(&data);
+
+        assert_eq!(
+            streams,
+            vec![StreamCredential {
+                kind: "rtmp-1".to_string(),
+                address: "rtmp://live-push.bilivideo.com/live-bvc/".to_string(),
+                key: "?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_stream_protocol_credentials() {
+        let data = json!({
+            "protocols": [
+                {
+                    "protocol": "rtmp",
+                    "addr": "rtmp://live-push.bilivideo.com/live-bvc/",
+                    "code": "?streamname=live_1_2&key=secret&schedule=rtmp&pflag=2"
+                },
+                {
+                    "protocol": "srt",
+                    "addr": "srt://live-push.bilivideo.com:1935",
+                    "code": "?streamid=#!::h=live-push.bilivideo.com,r=live_1_2"
+                }
+            ]
+        });
+
+        let streams = parse_streams(&data);
+
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].kind, "rtmp-1");
+        assert_eq!(streams[1].kind, "srt-1");
+    }
 }
 
 fn unix_millis() -> u128 {

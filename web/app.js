@@ -3,14 +3,17 @@ const state = {
   authenticated: false,
   danmuConnected: false,
   qrPollTimer: null,
+  streamCredentialsVisible: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
 const els = {
+  sidebar: $("#sidebar"),
+  sidebarClose: $("#sidebar-close"),
+  menuToggle: $("#menu-toggle"),
   serviceStatus: $("#service-status"),
   authStatus: $("#auth-status"),
   danmuStatus: $("#danmu-status"),
-  eventStatus: $("#event-status"),
   pageTitle: $("#page-title"),
   configPath: $("#config-path"),
   profile: $("#profile"),
@@ -31,6 +34,13 @@ const els = {
   startLive: $("#start-live"),
   stopLive: $("#stop-live"),
   streamList: $("#stream-list"),
+  toggleStreamCredentials: $("#toggle-stream-credentials"),
+  liveConsoleOutput: $("#live-console-output"),
+  clearLiveConsole: $("#clear-live-console"),
+  faceAuthPanel: $("#face-auth-panel"),
+  faceAuthQr: $("#face-auth-qr"),
+  faceAuthStatus: $("#face-auth-status"),
+  faceAuthLink: $("#face-auth-link"),
   roomId: $("#room-id"),
   uid: $("#uid"),
   host: $("#host"),
@@ -64,10 +74,15 @@ const els = {
   deleteBlocked: $("#delete-blocked"),
   loadBlocked: $("#load-blocked"),
   managerOutput: $("#manager-output"),
-  theme: $("#theme"),
-  saveConfig: $("#save-config"),
+  themeLight: $("#theme-light"),
+  themeDark: $("#theme-dark"),
   toasts: $("#toasts"),
 };
+
+// Overlay element for mobile sidebar
+const overlay = document.createElement("div");
+overlay.className = "sidebar-overlay";
+document.body.append(overlay);
 
 bindUi();
 connectEvents();
@@ -75,34 +90,49 @@ void refreshAll();
 
 function bindUi() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.addEventListener("click", () => switchTab(button.dataset.tab));
+    button.addEventListener("click", () => {
+      switchTab(button.dataset.tab);
+      closeSidebar();
+    });
   });
 
-  els.refresh.addEventListener("click", () => void refreshAll());
+  els.menuToggle.addEventListener("click", openSidebar);
+  els.sidebarClose.addEventListener("click", closeSidebar);
+  overlay.addEventListener("click", closeSidebar);
+
+  document.querySelectorAll("[data-collapse]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const card = header.closest(".card, .danmu-connect-card");
+      if (card) card.classList.toggle("collapsed");
+    });
+  });
+
+  els.refresh.addEventListener("click", () => void withLoading(els.refresh, refreshAll));
   els.logout.addEventListener("click", () => void logout());
   els.qrGenerate.addEventListener("click", () => void generateQr());
   els.qrStop.addEventListener("click", stopQrPolling);
-  els.cookieLogin.addEventListener("click", () => void cookieLogin());
-  els.bootstrap.addEventListener("click", () => void bootstrap());
-  els.saveTitle.addEventListener("click", () => void saveTitle());
-  els.saveArea.addEventListener("click", () => void saveArea());
-  els.startLive.addEventListener("click", () => void startLive());
-  els.stopLive.addEventListener("click", () => void stopLive());
+  els.cookieLogin.addEventListener("click", () => void withLoading(els.cookieLogin, cookieLogin));
+  els.bootstrap.addEventListener("click", () => void withLoading(els.bootstrap, bootstrap));
+  els.saveTitle.addEventListener("click", () => void withLoading(els.saveTitle, saveTitle));
+  els.saveArea.addEventListener("click", () => void withLoading(els.saveArea, saveArea));
+  els.startLive.addEventListener("click", () => void withLoading(els.startLive, startLive));
+  els.stopLive.addEventListener("click", () => void withLoading(els.stopLive, stopLive));
+  els.toggleStreamCredentials.addEventListener("click", toggleStreamCredentials);
+  els.streamList.addEventListener("click", (event) => void handleStreamListClick(event));
+  els.clearLiveConsole.addEventListener("click", clearLiveConsole);
   els.categoryId.addEventListener("change", () => {
-    renderAreaOptions();
-    void patchConfig({ category_id: els.categoryId.value, area_id: els.areaId.value });
+    const areaId = renderAreaOptions();
+    void patchConfig({ category_id: els.categoryId.value, area_id: areaId });
   });
   els.areaId.addEventListener("change", () => void patchConfig({ area_id: els.areaId.value }));
-  els.connectDanmu.addEventListener("click", () => void connectDanmu());
-  els.disconnectDanmu.addEventListener("click", () => void disconnectDanmu());
-  els.refreshDanmuToken.addEventListener("click", () => void refreshDanmuToken());
+  els.connectDanmu.addEventListener("click", () => void withLoading(els.connectDanmu, connectDanmu));
+  els.disconnectDanmu.addEventListener("click", () => void withLoading(els.disconnectDanmu, disconnectDanmu));
+  els.refreshDanmuToken.addEventListener("click", () => void withLoading(els.refreshDanmuToken, refreshDanmuToken));
   els.sendComment.addEventListener("click", () => void sendComment());
   els.commentMessage.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void sendComment();
-    }
+    if (event.key === "Enter") { event.preventDefault(); void sendComment(); }
   });
+
   els.loadRank.addEventListener("click", () => void loadRank());
   els.clearLogs.addEventListener("click", clearLogs);
   els.addAdmin.addEventListener("click", () => void managerCall("POST", "/api/manager/admins", { uid: els.adminUid.value }));
@@ -121,7 +151,26 @@ function bindUi() {
   els.addBlocked.addEventListener("click", () => void managerCall("POST", "/api/manager/blocked-words", { keyword: els.blockedKeyword.value }));
   els.deleteBlocked.addEventListener("click", () => void managerCall("POST", "/api/manager/blocked-words/delete", { keyword: els.blockedKeyword.value }));
   els.loadBlocked.addEventListener("click", () => void managerCall("GET", "/api/manager/blocked-words"));
-  els.saveConfig.addEventListener("click", () => void patchConfig({ theme: els.theme.value }));
+  [els.themeLight, els.themeDark].forEach((button) => {
+    button.addEventListener("click", () => void setTheme(button.dataset.themeValue));
+  });
+}
+
+function openSidebar() {
+  els.sidebar.classList.add("open");
+  overlay.classList.add("visible");
+}
+
+function closeSidebar() {
+  els.sidebar.classList.remove("open");
+  overlay.classList.remove("visible");
+}
+
+async function withLoading(button, fn) {
+  button.classList.add("loading");
+  try { await fn(); }
+  catch (error) { toast(error.message, true); }
+  finally { button.classList.remove("loading"); }
 }
 
 function switchTab(tab) {
@@ -131,7 +180,7 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tab}`);
   });
-  els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", manager: "管理", settings: "设置" })[tab] || "bilive";
+  els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", manager: "管理" })[tab] || "bilive";
 }
 
 async function refreshAll() {
@@ -141,7 +190,7 @@ async function refreshAll() {
       api("/api/auth/status"),
       api("/api/danmu/status"),
     ]);
-    setStatus(els.serviceStatus, `${health.status} v${health.version}`, health.status === "ok");
+    setStatus(els.serviceStatus, `v${health.version}`, health.status === "ok");
     state.authenticated = auth.authenticated;
     state.config = auth.config;
     state.danmuConnected = danmu.connected;
@@ -162,14 +211,8 @@ async function bootstrap() {
 
 async function cookieLogin() {
   const cookie = els.cookieInput.value.trim();
-  if (!cookie) {
-    toast("请先粘贴 Cookie", true);
-    return;
-  }
-  const result = await api("/api/auth/cookie", {
-    method: "POST",
-    body: { cookie },
-  });
+  if (!cookie) { toast("请先粘贴 Cookie", true); return; }
+  const result = await api("/api/auth/cookie", { method: "POST", body: { cookie } });
   state.authenticated = true;
   state.config = result.config;
   els.cookieInput.value = "";
@@ -188,7 +231,7 @@ async function logout() {
 
 async function generateQr() {
   stopQrPolling();
-  els.qrBox.textContent = "生成中";
+  els.qrBox.innerHTML = '<span>生成中</span>';
   const qr = await api("/api/auth/qrcode/generate", { method: "POST" });
   els.qrBox.innerHTML = qr.svg;
   els.qrStatus.textContent = "请使用哔哩哔哩 App 扫码";
@@ -197,10 +240,7 @@ async function generateQr() {
 }
 
 async function pollQr(qrcodeKey) {
-  const data = await api("/api/auth/qrcode/poll", {
-    method: "POST",
-    body: { qrcode_key: qrcodeKey },
-  });
+  const data = await api("/api/auth/qrcode/poll", { method: "POST", body: { qrcode_key: qrcodeKey } });
   switch (data.code) {
     case 0:
       stopQrPolling();
@@ -220,44 +260,27 @@ async function pollQr(qrcodeKey) {
 }
 
 function stopQrPolling() {
-  if (state.qrPollTimer) {
-    window.clearInterval(state.qrPollTimer);
-    state.qrPollTimer = null;
-  }
+  if (state.qrPollTimer) { window.clearInterval(state.qrPollTimer); state.qrPollTimer = null; }
   els.qrStop.disabled = true;
 }
 
 async function saveTitle() {
-  await api("/api/live/title", {
-    method: "POST",
-    body: { title: els.roomTitle.value },
-  });
+  await api("/api/live/title", { method: "POST", body: { title: els.roomTitle.value } });
   await refreshAll();
   toast("标题已更新");
 }
 
 async function saveArea() {
-  await api("/api/live/area", {
-    method: "POST",
-    body: { area_id: els.areaId.value },
-  });
+  await api("/api/live/area", { method: "POST", body: { area_id: els.areaId.value } });
   await refreshAll();
   toast("分区已更新");
 }
 
 async function startLive() {
-  await patchConfig({
-    room_title: els.roomTitle.value,
-    category_id: els.categoryId.value,
-    area_id: els.areaId.value,
-  });
+  await patchConfig({ room_title: els.roomTitle.value, category_id: els.categoryId.value, area_id: els.areaId.value });
   const result = await api("/api/live/start", { method: "POST" });
-  if (result.code === 0) {
-    await refreshAll();
-    toast("开播成功");
-    return;
-  }
-  showManagerResult(result);
+  showLiveConsoleResult(result);
+  if (result.code === 0) { await refreshAll(); toast("开播成功"); return; }
   toast(result.message || "开播需要额外验证", true);
 }
 
@@ -295,10 +318,7 @@ async function disconnectDanmu() {
 async function sendComment() {
   const message = els.commentMessage.value.trim();
   if (!message) return;
-  await api("/api/live/comment", {
-    method: "POST",
-    body: { message },
-  });
+  await api("/api/live/comment", { method: "POST", body: { message } });
   els.commentMessage.value = "";
   toast("弹幕已发送");
 }
@@ -315,10 +335,7 @@ async function managerCall(method, path, body) {
 }
 
 async function patchConfig(patch) {
-  const config = await api("/api/config", {
-    method: "PATCH",
-    body: patch,
-  });
+  const config = await api("/api/config", { method: "PATCH", body: patch });
   state.config = config;
   renderConfig();
   return config;
@@ -326,26 +343,42 @@ async function patchConfig(patch) {
 
 function renderConfig() {
   const config = state.config || {};
-  setStatus(els.authStatus, state.authenticated ? "已登录" : "未登录", state.authenticated);
+  setStatus(els.authStatus, state.authenticated ? (config.username || "已登录") : "未登录", state.authenticated);
   setStatus(els.danmuStatus, state.danmuConnected ? "已连接" : "未连接", state.danmuConnected);
   els.logout.disabled = !state.authenticated;
 
-  els.profile.textContent = state.authenticated
-    ? `${config.username || "未知用户"} · UID ${config.uid || 0} · 房间 ${config.room_id || 0}`
-    : "未登录";
+  if (state.authenticated) {
+    els.profile.innerHTML = `<span>${escapeHtml(config.username || "未知用户")} · UID ${escapeHtml(config.uid || 0)} · 房间 ${escapeHtml(config.room_id || 0)}</span>`;
+  } else {
+    els.profile.innerHTML = '<span class="profile-empty">未登录</span>';
+  }
   els.roomTitle.value = config.room_title || "";
   els.roomId.value = config.room_id || "";
   els.uid.value = config.uid || "";
-  els.theme.value = config.theme || "light";
+  applyTheme(config.theme || "dark");
   renderCategoryOptions();
   renderStreamList();
 }
 
+async function setTheme(theme) {
+  applyTheme(theme);
+  await patchConfig({ theme });
+}
+
+function applyTheme(theme) {
+  const selected = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = selected;
+  els.themeLight.classList.toggle("active", selected === "light");
+  els.themeDark.classList.toggle("active", selected === "dark");
+}
+
 function renderCategoryOptions() {
   const areas = Array.isArray(state.config?.area_list) ? state.config.area_list : [];
-  const selected = state.config?.category_id || areas[0]?.id || "";
+  const configCategoryId = selectValue(state.config?.category_id);
+  const fallbackCategoryId = selectValue(areas[0]?.id);
+  const selected = areas.some((area) => selectValue(area.id) === configCategoryId) ? configCategoryId : fallbackCategoryId;
   els.categoryId.innerHTML = areas
-    .map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`)
+    .map((area) => `<option value="${escapeHtml(selectValue(area.id))}">${escapeHtml(area.name)}</option>`)
     .join("");
   els.categoryId.value = selected;
   renderAreaOptions();
@@ -353,43 +386,121 @@ function renderCategoryOptions() {
 
 function renderAreaOptions() {
   const areas = Array.isArray(state.config?.area_list) ? state.config.area_list : [];
-  const parent = areas.find((area) => area.id === els.categoryId.value) || areas[0];
+  const parent = areas.find((area) => selectValue(area.id) === els.categoryId.value) || areas[0];
   const children = Array.isArray(parent?.list) ? parent.list : [];
-  const selected = state.config?.area_id || children[0]?.id || "";
+  const configAreaId = selectValue(state.config?.area_id);
+  const fallbackAreaId = selectValue(children[0]?.id);
+  const selected = children.some((area) => selectValue(area.id) === configAreaId) ? configAreaId : fallbackAreaId;
   els.areaId.innerHTML = children
-    .map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`)
+    .map((area) => `<option value="${escapeHtml(selectValue(area.id))}">${escapeHtml(area.name)}</option>`)
     .join("");
   els.areaId.value = selected;
+  return selected;
 }
 
 function renderStreamList() {
-  const streams = Array.isArray(state.config?.streams) ? state.config.streams : [];
+  const streams = uniqueStreams(Array.isArray(state.config?.streams) ? state.config.streams : []);
   if (streams.length === 0) {
     els.streamList.textContent = "暂无推流凭证";
+    els.toggleStreamCredentials.disabled = true;
+    els.toggleStreamCredentials.textContent = "显示";
     return;
   }
+  els.toggleStreamCredentials.disabled = false;
+  els.toggleStreamCredentials.textContent = state.streamCredentialsVisible ? "隐藏" : "显示";
   els.streamList.innerHTML = streams
-    .map((stream) => `
+    .map((stream, index) => {
+      const address = String(stream.address || "");
+      const streamCode = String(stream.key || "");
+      const fullUrl = streamUrl(address, streamCode);
+      const fullUrlText = credentialText(fullUrl);
+      const addressText = credentialText(address);
+      const streamCodeText = credentialText(streamCode);
+      return `
       <article class="stream-item">
-        <strong>${escapeHtml(stream.type)}</strong>
-        <div>服务器地址 <code>${escapeHtml(stream.address)}</code></div>
-        <div>流密钥 <code>${escapeHtml(stream.key)}</code></div>
-      </article>
-    `)
+        <div class="stream-header">
+          <strong>${escapeHtml(stream.type)}</strong>
+          <div class="stream-actions">
+            <button class="btn btn-ghost btn-sm" data-copy-stream="${index}" data-copy-field="fullUrl" type="button">复制完整地址</button>
+            <button class="btn btn-ghost btn-sm" data-copy-stream="${index}" data-copy-field="address" type="button">复制推流地址</button>
+            <button class="btn btn-ghost btn-sm" data-copy-stream="${index}" data-copy-field="streamCode" type="button">复制推流码</button>
+            <button class="btn btn-ghost btn-sm" data-test-stream="${index}" type="button">测试推流</button>
+          </div>
+        </div>
+        <div class="credential-row"><span>完整推流地址</span><code>${escapeHtml(fullUrlText)}</code></div>
+        <div class="credential-row"><span>推流地址</span><code>${escapeHtml(addressText)}</code></div>
+        <div class="credential-row"><span>推流码</span><code>${escapeHtml(streamCodeText)}</code></div>
+      </article>`;
+    })
     .join("");
+}
+
+function toggleStreamCredentials() {
+  state.streamCredentialsVisible = !state.streamCredentialsVisible;
+  renderStreamList();
+}
+
+async function handleStreamListClick(event) {
+  const testButton = event.target.closest("[data-test-stream]");
+  if (testButton) { await testStream(Number(testButton.dataset.testStream), testButton); return; }
+  const button = event.target.closest("[data-copy-stream]");
+  if (!button) return;
+  const streams = uniqueStreams(Array.isArray(state.config?.streams) ? state.config.streams : []);
+  const stream = streams[Number(button.dataset.copyStream)];
+  if (!stream) return;
+  const address = String(stream.address || "");
+  const streamCode = String(stream.key || "");
+  const values = { fullUrl: streamUrl(address, streamCode), address, streamCode };
+  await copyText(values[button.dataset.copyField] || "");
+}
+
+async function testStream(index, button) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "测试中";
+  showLiveConsoleResult({ message: "测试推流中", duration_seconds: 5 });
+  try {
+    const result = await api("/api/live/test-stream", { method: "POST", body: { index } });
+    showLiveConsoleResult(result);
+    toast(result.warning ? "测试推流完成，收尾警告已忽略" : "测试推流完成");
+  } catch (error) {
+    showLiveConsoleResult({ ok: false, error: error.message });
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+function credentialText(value) {
+  return state.streamCredentialsVisible ? (value || "") : (value ? "****************" : "");
+}
+
+function uniqueStreams(streams) {
+  const seen = new Set();
+  return streams.filter((stream) => {
+    const key = `${stream.address || ""}\n${stream.key || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function streamUrl(address, key) {
+  if (!address || !key) return address || key;
+  if (key.startsWith("?") || key.startsWith("&")) return `${address}${key}`;
+  return `${address}${address.endsWith("/") ? "" : "/"}${key}`;
 }
 
 function connectEvents() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${window.location.host}/api/events`);
-  setStatus(els.eventStatus, "连接中", false);
 
-  socket.addEventListener("open", () => setStatus(els.eventStatus, "已连接", true));
+  socket.addEventListener("open", () => {});
   socket.addEventListener("close", () => {
-    setStatus(els.eventStatus, "未连接", false);
     window.setTimeout(connectEvents, 1500);
   });
-  socket.addEventListener("error", () => setStatus(els.eventStatus, "异常", false));
+  socket.addEventListener("error", () => {});
   socket.addEventListener("message", (message) => {
     const event = JSON.parse(message.data);
     if (event.type === "connection") {
@@ -418,7 +529,6 @@ function appendEvent(event) {
 function pushLog(title, body, tone) {
   const empty = els.logList.querySelector(".empty-state");
   if (empty) empty.remove();
-
   const item = document.createElement("article");
   item.className = `log-item ${tone}`;
   const meta = document.createElement("div");
@@ -431,36 +541,83 @@ function pushLog(title, body, tone) {
   meta.append(heading, time);
   item.append(meta, pre);
   els.logList.prepend(item);
-
-  while (els.logList.children.length > 160) {
-    els.logList.lastElementChild.remove();
-  }
+  while (els.logList.children.length > 160) els.logList.lastElementChild.remove();
 }
 
 function clearLogs() {
-  els.logList.textContent = "";
-  const empty = document.createElement("div");
-  empty.className = "empty-state";
-  empty.textContent = "暂无事件";
-  els.logList.append(empty);
+  els.logList.innerHTML = '<div class="empty-state"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>暂无事件</span></div>';
+}
+
+function showLiveConsoleResult(value) {
+  els.liveConsoleOutput.textContent = JSON.stringify(value, null, 2);
+  renderFaceAuth(value);
+}
+
+function clearLiveConsole() {
+  hideFaceAuth();
+  els.liveConsoleOutput.textContent = "暂无数据";
+}
+
+function renderFaceAuth(value) {
+  const faceAuth = value?.face_auth;
+  if (!faceAuth?.svg) { hideFaceAuth(); return; }
+  els.faceAuthPanel.hidden = false;
+  els.faceAuthQr.innerHTML = faceAuth.svg;
+  els.faceAuthStatus.textContent = value.message || "需要完成开播身份验证";
+  if (faceAuth.url) {
+    els.faceAuthLink.href = faceAuth.url;
+    els.faceAuthLink.hidden = false;
+  } else {
+    els.faceAuthLink.removeAttribute("href");
+    els.faceAuthLink.hidden = true;
+  }
+}
+
+function hideFaceAuth() {
+  els.faceAuthPanel.hidden = true;
+  els.faceAuthQr.textContent = "未生成";
+  els.faceAuthStatus.textContent = "等待开播返回";
+  els.faceAuthLink.removeAttribute("href");
+  els.faceAuthLink.hidden = true;
+}
+
+async function copyText(value) {
+  if (!value) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      fallbackCopyText(value);
+    }
+    toast("已复制");
+  } catch {
+    fallbackCopyText(value);
+    toast("已复制");
+  }
+}
+
+function fallbackCopyText(value) {
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
 }
 
 async function api(path, options = {}) {
-  const init = {
-    method: options.method || "GET",
-    headers: {},
-  };
+  const init = { method: options.method || "GET", headers: {} };
   if (options.body !== undefined) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(options.body);
   }
-
   const response = await fetch(path, init);
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    throw new Error(data?.error || response.statusText);
-  }
+  if (!response.ok) throw new Error(data?.error || response.statusText);
   return data;
 }
 
@@ -469,7 +626,8 @@ function showManagerResult(value) {
 }
 
 function setStatus(element, text, ok) {
-  element.textContent = text;
+  const span = element.querySelector(".status-text");
+  if (span) span.textContent = text;
   element.classList.toggle("ok", ok);
 }
 
@@ -482,11 +640,11 @@ function toast(message, error = false) {
 }
 
 function tryParseJson(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function selectValue(value) {
+  return value == null ? "" : String(value);
 }
 
 function escapeHtml(value) {

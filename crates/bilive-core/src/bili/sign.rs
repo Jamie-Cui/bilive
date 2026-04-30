@@ -105,4 +105,46 @@ mod tests {
         assert!(signed.contains("wts="));
         assert!(signed.contains("w_rid="));
     }
+
+    #[test]
+    fn app_sign_adds_a_32_character_signature() {
+        let signed = app_sign(vec![("ts", "1".to_string())]);
+        let sign = signed.rsplit_once("sign=").unwrap().1;
+
+        assert_eq!(sign.len(), 32);
+        assert!(sign.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn mixin_key_extracts_filenames_before_reordering() {
+        let from_urls = mixin_key(
+            "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+            "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+        );
+        let from_keys = mixin_key(
+            "7cd084941338484aae1ad9425b84077c",
+            "4932caff0ff746eab6f01bf08b70ac45",
+        );
+
+        assert_eq!(from_urls, from_keys);
+        assert_eq!(from_urls.len(), 32);
+    }
+
+    #[test]
+    fn clean_wbi_value_removes_forbidden_characters() {
+        assert_eq!(clean_wbi_value("a!b'c(d)e*f"), "abcdef");
+    }
+
+    #[test]
+    fn encode_pairs_percent_encodes_values() {
+        let encoded = encode_pairs([("msg", "hello world"), ("symbol", "a+b")].into_iter());
+
+        assert_eq!(encoded, "msg=hello+world&symbol=a%2Bb");
+    }
+
+    #[test]
+    fn extract_key_handles_urls_and_plain_keys() {
+        assert_eq!(extract_key("https://example.test/path/key.png"), "key");
+        assert_eq!(extract_key("plain-key"), "plain-key");
+    }
 }

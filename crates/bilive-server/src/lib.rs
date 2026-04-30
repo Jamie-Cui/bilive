@@ -2,7 +2,7 @@
 // Author: Jamie Cui
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use axum::{
     Json, Router,
     extract::{
@@ -132,6 +132,7 @@ struct KeywordRequest {
     keyword: String,
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -150,6 +151,7 @@ fn default_room_silent_level() -> u64 {
 }
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
+    let web_dir = resolve_web_dir(config.web_dir)?;
     let store = ConfigStore::load(config.config_path.clone())
         .await
         .context("failed to load config")?;
@@ -209,7 +211,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/danmu/connect", post(connect_danmu))
         .route("/api/danmu/disconnect", post(disconnect_danmu))
         .route("/api/danmu/status", get(danmu_status))
-        .fallback_service(static_service(config.web_dir.clone()))
+        .fallback_service(static_service(web_dir.clone()))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -220,7 +222,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     info!(
         "bilive listening on http://{} with web dir {}",
         config.listen,
-        config.web_dir.display()
+        web_dir.display()
     );
     info!("config path: {}", store.path().display());
 
@@ -233,6 +235,15 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
 fn static_service(web_dir: PathBuf) -> ServeDir<ServeFile> {
     let index = web_dir.join("index.html");
     ServeDir::new(web_dir).fallback(ServeFile::new(index))
+}
+
+fn resolve_web_dir(web_dir: PathBuf) -> anyhow::Result<PathBuf> {
+    let index = web_dir.join("index.html");
+    if !index.is_file() {
+        bail!("web dir {} does not contain index.html", web_dir.display());
+    }
+    std::fs::canonicalize(&web_dir)
+        .with_context(|| format!("failed to resolve web dir {}", web_dir.display()))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -805,6 +816,154 @@ mod tests {
         let stderr = "[out#0/flv] Error writing trailer: Broken pipe";
 
         assert!(!is_rtmp_close_warning(stderr, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn stream_url_joins_plain_keys_with_one_slash() {
+        assert_eq!(
+            stream_url("rtmp://live-push.example/live", "stream-key"),
+            "rtmp://live-push.example/live/stream-key"
+        );
+        assert_eq!(
+            stream_url("rtmp://live-push.example/live/", "stream-key"),
+            "rtmp://live-push.example/live/stream-key"
+        );
+        assert_eq!(stream_url("", "stream-key"), "stream-key");
+        assert_eq!(
+            stream_url("rtmp://live-push.example/live", ""),
+            "rtmp://live-push.example/live"
+        );
+    }
+
+    #[test]
+    fn public_config_omits_auth_secrets_and_exposes_token_availability() {
+        let config = bilive_core::AppConfig {
+            cookies: vec![bilive_core::AppCookie {
+                name: "SESSDATA".to_string(),
+                value: "cookie-secret".to_string(),
+            }],
+            csrf: Some("csrf-secret".to_string()),
+            room_token: "room-token-secret".to_string(),
+            uid: 100,
+            room_id: 200,
+            username: Some("tester".to_string()),
+            streams: vec![bilive_core::StreamCredential {
+                kind: "rtmp-1".to_string(),
+                address: "rtmp://example.test/live".to_string(),
+                key: "stream-key".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let value = public_config(config);
+
+        assert_eq!(value["uid"], 100);
+        assert_eq!(value["room_id"], 200);
+        assert_eq!(value["username"], "tester");
+        assert_eq!(value["room_token_available"], true);
+        assert!(value.get("cookies").is_none());
+        assert!(value.get("csrf").is_none());
+        assert!(value.get("room_token").is_none());
+        assert!(!value.to_string().contains("room-token-secret"));
+    }
+
+    #[test]
+    fn detects_face_auth_from_code_message_or_msg() {
+        assert!(requires_face_auth(&json!({ "code": 60024 })));
+        assert!(requires_face_auth(&json!({ "message": "需要身份验证" })));
+        assert!(requires_face_auth(&json!({ "msg": "请完成人脸认证" })));
+        assert!(!requires_face_auth(&json!({ "code": 0, "message": "ok" })));
+    }
+
+    #[test]
+    fn face_auth_url_embeds_uid() {
+        assert_eq!(
+            face_auth_url(123),
+            "https://www.bilibili.com/blackboard/live/face-auth-middle.html?source_event=400&mid=123"
+        );
+    }
+
+    #[test]
+    fn render_qr_svg_returns_svg_markup() {
+        let svg = render_qr_svg("https://example.test/login").unwrap();
+
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("#111827"));
+        assert!(svg.contains("#ffffff"));
+    }
+
+    #[test]
+    fn sanitize_ffmpeg_error_redacts_stream_key_keeps_tail_and_limits_length() {
+        let stderr = [
+            "line 1",
+            "line 2 key-secret",
+            "line 3",
+            "line 4 key-secret",
+            "line 5",
+        ]
+        .join("\n");
+
+        let sanitized = sanitize_ffmpeg_error(&stderr, "key-secret");
+
+        assert!(!sanitized.contains("line 1"));
+        assert!(sanitized.contains("line 2 <stream-key>"));
+        assert!(sanitized.contains("line 4 <stream-key>"));
+        assert!(!sanitized.contains("key-secret"));
+        assert!(sanitized.len() <= 1200);
+    }
+
+    #[test]
+    fn sanitize_ffmpeg_error_handles_empty_stderr() {
+        assert_eq!(
+            sanitize_ffmpeg_error(" \n\t ", "key"),
+            "ffmpeg 没有返回错误详情"
+        );
+    }
+
+    #[test]
+    fn rtmp_close_warning_requires_broken_pipe_and_late_elapsed_time() {
+        assert!(!is_rtmp_close_warning(
+            "Error writing trailer: Connection reset",
+            Duration::from_secs(TEST_STREAM_DURATION_SECONDS)
+        ));
+        assert!(!is_rtmp_close_warning(
+            "Broken pipe",
+            Duration::from_secs(TEST_STREAM_DURATION_SECONDS)
+        ));
+    }
+
+    #[test]
+    fn bili_errors_map_to_http_statuses() {
+        let not_logged_in: ApiError = BiliError::NotLoggedIn.into();
+        assert_eq!(not_logged_in.status, StatusCode::UNAUTHORIZED);
+
+        let missing_config: ApiError = BiliError::MissingConfig("bili_jct").into();
+        assert_eq!(missing_config.status, StatusCode::BAD_REQUEST);
+
+        let api_error: ApiError = BiliError::Api {
+            code: -1,
+            message: "bad".to_string(),
+        }
+        .into();
+        assert_eq!(api_error.status, StatusCode::BAD_GATEWAY);
+
+        let invalid_response: ApiError = BiliError::InvalidResponse("data").into();
+        assert_eq!(invalid_response.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn api_error_response_serializes_json_body() {
+        let response = ApiError::bad_request("bad request").into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({ "error": "bad request" })
+        );
     }
 }
 

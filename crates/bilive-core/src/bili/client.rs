@@ -989,6 +989,20 @@ fn extract_key(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    fn unique_config_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "bilive-client-{name}-{}-{nanos}",
+                std::process::id()
+            ))
+            .join("config.json")
+    }
 
     #[test]
     fn parses_unique_stream_credentials() {
@@ -1040,6 +1054,222 @@ mod tests {
         assert_eq!(streams.len(), 2);
         assert_eq!(streams[0].kind, "rtmp-1");
         assert_eq!(streams[1].kind, "srt-1");
+    }
+
+    #[test]
+    fn parse_streams_trims_values_skips_invalid_and_numbers_by_protocol() {
+        let data = json!({
+            "protocols": [
+                {
+                    "protocol": "hls",
+                    "addr": "https://example.test/live",
+                    "code": "ignored"
+                },
+                {
+                    "protocol": "rtmp",
+                    "addr": " rtmp://example.test/live ",
+                    "code": " key-1 "
+                },
+                {
+                    "protocol": "srt",
+                    "addr": "srt://example.test:1935",
+                    "code": "?streamid=abc"
+                },
+                {
+                    "protocol": "rtmp",
+                    "addr": "rtmp://example.test/live2",
+                    "code": "key-2"
+                },
+                {
+                    "protocol": "rtmp",
+                    "addr": "",
+                    "code": "missing-address"
+                }
+            ]
+        });
+
+        let streams = parse_streams(&data);
+
+        assert_eq!(
+            streams,
+            vec![
+                StreamCredential {
+                    kind: "rtmp-1".to_string(),
+                    address: "rtmp://example.test/live".to_string(),
+                    key: "key-1".to_string(),
+                },
+                StreamCredential {
+                    kind: "srt-1".to_string(),
+                    address: "srt://example.test:1935".to_string(),
+                    key: "?streamid=abc".to_string(),
+                },
+                StreamCredential {
+                    kind: "rtmp-2".to_string(),
+                    address: "rtmp://example.test/live2".to_string(),
+                    key: "key-2".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_set_cookie_first_pair_only() {
+        assert_eq!(
+            parse_set_cookie("SESSDATA=abc; Path=/; HttpOnly"),
+            Some(AppCookie {
+                name: "SESSDATA".to_string(),
+                value: "abc".to_string(),
+            })
+        );
+        assert_eq!(parse_set_cookie("empty=; Path=/"), None);
+        assert_eq!(parse_set_cookie("no-equals"), None);
+    }
+
+    #[test]
+    fn csrf_reads_bili_jct_cookie() {
+        let mut config = AppConfig::default();
+        assert!(matches!(
+            csrf(&config),
+            Err(BiliError::MissingConfig("bili_jct"))
+        ));
+
+        config.set_cookies(vec![AppCookie {
+            name: "bili_jct".to_string(),
+            value: "csrf-token".to_string(),
+        }]);
+        assert_eq!(csrf(&config).unwrap(), "csrf-token");
+    }
+
+    #[test]
+    fn encode_component_percent_encodes_query_values() {
+        assert_eq!(encode_component("a b+c&汉"), "a+b%2Bc%26%E6%B1%89");
+    }
+
+    #[test]
+    fn extract_key_handles_urls_and_plain_keys() {
+        assert_eq!(
+            extract_key("https://i0.hdslb.com/bfs/wbi/key-name.png"),
+            "key-name"
+        );
+        assert_eq!(extract_key("plain-key"), "plain-key");
+    }
+
+    #[tokio::test]
+    async fn login_status_requires_sessdata_and_csrf() {
+        let path = unique_config_path("login-status");
+        let parent = path.parent().unwrap().to_path_buf();
+        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let client = BiliClient::new(store.clone()).unwrap();
+
+        assert!(!client.login_status().await.authenticated);
+
+        store
+            .update(|config| {
+                config.set_cookies(vec![AppCookie {
+                    name: "SESSDATA".to_string(),
+                    value: "abc".to_string(),
+                }]);
+            })
+            .await
+            .unwrap();
+        assert!(!client.login_status().await.authenticated);
+
+        store
+            .update(|config| {
+                config.set_cookies(vec![AppCookie {
+                    name: "bili_jct".to_string(),
+                    value: "csrf".to_string(),
+                }]);
+            })
+            .await
+            .unwrap();
+        let status = client.login_status().await;
+        assert!(status.authenticated);
+        assert_eq!(status.config_path, path.display().to_string());
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn patch_config_updates_only_supported_string_fields() {
+        let path = unique_config_path("patch");
+        let parent = path.parent().unwrap().to_path_buf();
+        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        store
+            .update(|config| {
+                config.uid = 42;
+                config.room_id = 100;
+            })
+            .await
+            .unwrap();
+        let client = BiliClient::new(store.clone()).unwrap();
+
+        let updated = client
+            .patch_config(json!({
+                "room_title": "New title",
+                "category_id": "12",
+                "area_id": "34",
+                "theme": "dark",
+                "uid": 999,
+                "room_id": 888,
+                "ignored": "value",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(updated.room_title, "New title");
+        assert_eq!(updated.category_id, "12");
+        assert_eq!(updated.area_id, "34");
+        assert_eq!(updated.theme, "dark");
+        assert_eq!(updated.uid, 42);
+        assert_eq!(updated.room_id, 100);
+
+        let reloaded = ConfigStore::load(Some(path.clone())).await.unwrap();
+        assert_eq!(reloaded.get().await.theme, "dark");
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn set_cookie_login_rejects_missing_required_cookies_without_saving() {
+        let path = unique_config_path("cookie-login");
+        let parent = path.parent().unwrap().to_path_buf();
+        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let client = BiliClient::new(store.clone()).unwrap();
+
+        let error = client.set_cookie_login("SESSDATA=abc").await.unwrap_err();
+
+        assert!(matches!(error, BiliError::NotLoggedIn));
+        assert!(store.get().await.cookies.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn capture_cookies_updates_store_and_csrf() {
+        let path = unique_config_path("capture");
+        let parent = path.parent().unwrap().to_path_buf();
+        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let client = BiliClient::new(store.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("SESSDATA=abc; Path=/; HttpOnly"),
+        );
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("bili_jct=csrf; Path=/"),
+        );
+        headers.append(SET_COOKIE, HeaderValue::from_static("empty=; Path=/"));
+
+        client.capture_cookies(&headers).await.unwrap();
+
+        let config = store.get().await;
+        assert_eq!(config.cookie("SESSDATA"), Some("abc"));
+        assert_eq!(config.cookie("bili_jct"), Some("csrf"));
+        assert_eq!(config.csrf.as_deref(), Some("csrf"));
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
     }
 }
 

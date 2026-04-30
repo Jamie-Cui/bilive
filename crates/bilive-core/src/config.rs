@@ -242,6 +242,19 @@ pub fn parse_cookie_header(cookie_header: &str) -> Vec<AppCookie> {
 mod tests {
     use super::*;
 
+    fn unique_config_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "bilive-config-{name}-{}-{nanos}",
+                std::process::id()
+            ))
+            .join("config.json")
+    }
+
     #[test]
     fn parses_browser_cookie_header() {
         let cookies = parse_cookie_header("SESSDATA=abc; bili_jct=csrf; empty=; theme=dark");
@@ -272,5 +285,150 @@ mod tests {
             value: "csrf".to_string(),
         }]);
         assert_eq!(config.csrf.as_deref(), Some("csrf"));
+    }
+
+    #[test]
+    fn cookie_header_filters_empty_names_and_values() {
+        let config = AppConfig {
+            cookies: vec![
+                AppCookie {
+                    name: "SESSDATA".to_string(),
+                    value: "abc".to_string(),
+                },
+                AppCookie {
+                    name: String::new(),
+                    value: "ignored".to_string(),
+                },
+                AppCookie {
+                    name: "empty".to_string(),
+                    value: String::new(),
+                },
+                AppCookie {
+                    name: "bili_jct".to_string(),
+                    value: "csrf".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(config.cookie_header(), "SESSDATA=abc; bili_jct=csrf");
+    }
+
+    #[test]
+    fn set_cookies_replaces_existing_values_and_ignores_empty_names() {
+        let mut config = AppConfig::default();
+        config.set_cookies(vec![
+            AppCookie {
+                name: "SESSDATA".to_string(),
+                value: "old".to_string(),
+            },
+            AppCookie {
+                name: "bili_jct".to_string(),
+                value: "old-csrf".to_string(),
+            },
+        ]);
+
+        config.set_cookies(vec![
+            AppCookie {
+                name: "SESSDATA".to_string(),
+                value: "new".to_string(),
+            },
+            AppCookie {
+                name: String::new(),
+                value: "ignored".to_string(),
+            },
+            AppCookie {
+                name: "bili_jct".to_string(),
+                value: "new-csrf".to_string(),
+            },
+        ]);
+
+        assert_eq!(config.cookies.len(), 2);
+        assert_eq!(config.cookie("SESSDATA"), Some("new"));
+        assert_eq!(config.csrf.as_deref(), Some("new-csrf"));
+    }
+
+    #[test]
+    fn clear_auth_removes_login_and_live_state() {
+        let mut config = AppConfig {
+            cookies: vec![AppCookie {
+                name: "SESSDATA".to_string(),
+                value: "abc".to_string(),
+            }],
+            csrf: Some("csrf".to_string()),
+            uid: 123,
+            avatar: Some("face".to_string()),
+            username: Some("name".to_string()),
+            room_id: 456,
+            room_token: "token".to_string(),
+            is_open_live: true,
+            streams: vec![StreamCredential {
+                kind: "rtmp-1".to_string(),
+                address: "rtmp://example/live".to_string(),
+                key: "secret".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        config.clear_auth();
+
+        assert!(config.cookies.is_empty());
+        assert!(config.csrf.is_none());
+        assert_eq!(config.uid, 0);
+        assert!(config.avatar.is_none());
+        assert!(config.username.is_none());
+        assert_eq!(config.room_id, 0);
+        assert!(config.room_token.is_empty());
+        assert!(!config.is_open_live);
+        assert!(config.streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_store_loads_default_and_persists_updates() {
+        let path = unique_config_path("persist");
+        let parent = path.parent().unwrap().to_path_buf();
+
+        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        assert_eq!(store.path(), path.as_path());
+        assert_eq!(store.get().await.theme, "light");
+        assert!(!path.exists());
+
+        let updated = store
+            .update(|config| {
+                config.theme = "dark".to_string();
+                config.room_id = 12345;
+                config.set_cookies(vec![AppCookie {
+                    name: "bili_jct".to_string(),
+                    value: "csrf".to_string(),
+                }]);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated.theme, "dark");
+        assert_eq!(updated.room_id, 12345);
+        assert_eq!(updated.csrf.as_deref(), Some("csrf"));
+        assert!(path.exists());
+
+        let reloaded = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let saved = reloaded.get().await;
+        assert_eq!(saved.theme, "dark");
+        assert_eq!(saved.room_id, 12345);
+        assert_eq!(saved.csrf.as_deref(), Some("csrf"));
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn config_store_falls_back_to_default_for_invalid_json() {
+        let path = unique_config_path("invalid");
+        let parent = path.parent().unwrap().to_path_buf();
+        tokio::fs::create_dir_all(&parent).await.unwrap();
+        tokio::fs::write(&path, b"{not json").await.unwrap();
+
+        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+
+        assert_eq!(store.get().await.theme, "light");
+        let _ = tokio::fs::remove_dir_all(parent).await;
     }
 }

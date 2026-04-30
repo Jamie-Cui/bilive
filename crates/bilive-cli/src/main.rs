@@ -129,9 +129,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(args: ServiceArgs) -> anyhow::Result<()> {
+    let web_dir = resolve_web_dir(args.web_dir)?;
     bilive_server::run(bilive_server::ServerConfig {
         listen: args.listen,
-        web_dir: args.web_dir,
+        web_dir,
         config_path: args.config,
     })
     .await
@@ -159,6 +160,8 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         ServiceState::Stopped => {}
     }
 
+    let web_dir = resolve_web_dir(args.service.web_dir.clone())?;
+
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -175,7 +178,7 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         .arg("--listen")
         .arg(args.service.listen.to_string())
         .arg("--web-dir")
-        .arg(&args.service.web_dir)
+        .arg(&web_dir)
         .env("BILIVE_STATE_DIR", &paths.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -302,6 +305,25 @@ fn runtime_paths(args: &ControlArgs) -> anyhow::Result<RuntimePaths> {
     })
 }
 
+fn resolve_web_dir(web_dir: PathBuf) -> anyhow::Result<PathBuf> {
+    let web_dir = if web_dir.is_absolute() {
+        web_dir
+    } else {
+        env::current_dir()
+            .context("failed to resolve current directory")?
+            .join(web_dir)
+    };
+    let index = web_dir.join("index.html");
+    if !index.is_file() {
+        bail!(
+            "web dir {} does not contain index.html; pass --web-dir with the static UI directory",
+            web_dir.display()
+        );
+    }
+    fs::canonicalize(&web_dir)
+        .with_context(|| format!("failed to resolve web dir {}", web_dir.display()))
+}
+
 fn default_state_dir() -> anyhow::Result<PathBuf> {
     if let Some(path) = env::var_os("BILIVE_STATE_DIR") {
         return Ok(PathBuf::from(path));
@@ -409,4 +431,103 @@ fn init_logging() {
     });
 
     fmt().with_env_filter(filter).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("bilive-cli-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn control_args(state_dir: PathBuf) -> ControlArgs {
+        ControlArgs {
+            state_dir: Some(state_dir),
+            pid_file: None,
+            log_file: None,
+            timeout: 1,
+        }
+    }
+
+    #[test]
+    fn runtime_paths_default_files_live_under_state_dir() {
+        let state_dir = unique_dir("runtime-defaults");
+        let paths = runtime_paths(&control_args(state_dir.clone())).unwrap();
+
+        assert_eq!(paths.state_dir, state_dir);
+        assert_eq!(paths.pid_file, paths.state_dir.join(PID_FILE_NAME));
+        assert_eq!(paths.log_file, paths.state_dir.join(LOG_FILE_NAME));
+    }
+
+    #[test]
+    fn runtime_paths_honors_file_overrides() {
+        let state_dir = unique_dir("runtime-overrides");
+        let pid_file = state_dir.join("custom.pid");
+        let log_file = state_dir.join("custom.log");
+        let args = ControlArgs {
+            state_dir: Some(state_dir.clone()),
+            pid_file: Some(pid_file.clone()),
+            log_file: Some(log_file.clone()),
+            timeout: 1,
+        };
+
+        let paths = runtime_paths(&args).unwrap();
+
+        assert_eq!(paths.state_dir, state_dir);
+        assert_eq!(paths.pid_file, pid_file);
+        assert_eq!(paths.log_file, log_file);
+    }
+
+    #[test]
+    fn read_pid_trims_whitespace_and_rejects_invalid_files() {
+        let dir = unique_dir("pid");
+        fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("bilive.pid");
+
+        fs::write(&pid_file, " 1234\n").unwrap();
+        assert_eq!(read_pid(&pid_file).unwrap(), 1234);
+
+        fs::write(&pid_file, "not-a-pid").unwrap();
+        assert!(read_pid(&pid_file).is_err());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn service_state_detects_stopped_running_and_stale_pid_files() {
+        let dir = unique_dir("state");
+        fs::create_dir_all(&dir).unwrap();
+        let paths = RuntimePaths {
+            state_dir: dir.clone(),
+            pid_file: dir.join("bilive.pid"),
+            log_file: dir.join("bilive.log"),
+        };
+
+        assert_eq!(service_state(&paths).unwrap(), ServiceState::Stopped);
+
+        fs::write(&paths.pid_file, format!("{}\n", std::process::id())).unwrap();
+        assert_eq!(service_state(&paths).unwrap(), ServiceState::Running);
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let stale_pid = child.id();
+        child.wait().unwrap();
+        fs::write(&paths.pid_file, format!("{stale_pid}\n")).unwrap();
+        assert_eq!(service_state(&paths).unwrap(), ServiceState::StalePid);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn process_exists_detects_current_process() {
+        assert!(process_exists(std::process::id()).unwrap());
+    }
 }

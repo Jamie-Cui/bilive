@@ -174,3 +174,164 @@ impl DanmuClient {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::protocol::ProtocolHeader;
+    use super::*;
+    use bytes::BytesMut;
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
+    use tokio::sync::broadcast::{self, error::TryRecvError};
+    use tokio_util::codec::Encoder;
+
+    fn client_and_receiver() -> (DanmuClient, broadcast::Receiver<Event>) {
+        let (events, receiver) = broadcast::channel(16);
+        (DanmuClient::new(events), receiver)
+    }
+
+    fn message(opcode: u32, protocol_version: u16, payload: Vec<u8>) -> Message {
+        Message {
+            header: ProtocolHeader {
+                total_size: 16 + payload.len() as u32,
+                header_size: 16,
+                protocol_version,
+                opcode,
+                sequence: 1,
+            },
+            payload,
+        }
+    }
+
+    fn normal_message(protocol_version: u16, payload: &[u8]) -> Message {
+        message(Opcode::NORMAL, protocol_version, payload.to_vec())
+    }
+
+    fn packet_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut buffer = BytesMut::new();
+        ProtocolCodec
+            .encode(normal_message(1, payload), &mut buffer)
+            .unwrap();
+        buffer.to_vec()
+    }
+
+    fn zlib_compress(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn brotli_compress(payload: &[u8]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        {
+            let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, 5, 22);
+            writer.write_all(payload).unwrap();
+        }
+        compressed
+    }
+
+    #[test]
+    fn emits_plain_normal_payloads() {
+        let (client, mut receiver) = client_and_receiver();
+
+        client.handle_message(normal_message(1, br#"{"cmd":"DANMU_MSG"}"#));
+
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, r#"{"cmd":"DANMU_MSG"}"#),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_non_normal_messages() {
+        let (client, mut receiver) = client_and_receiver();
+
+        client.handle_message(message(Opcode::HEARTBEAT, 1, b"ignored".to_vec()));
+
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn invalid_utf8_payloads_emit_errors() {
+        let (client, mut receiver) = client_and_receiver();
+
+        client.handle_message(normal_message(1, &[0xff, 0xfe]));
+
+        match receiver.try_recv().unwrap() {
+            Event::Error { message } => assert!(message.contains("invalid message payload")),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depacks_zlib_compressed_sub_packets() {
+        let (client, mut receiver) = client_and_receiver();
+        let packets = [packet_bytes(b"first"), packet_bytes(b"second")].concat();
+        let compressed = zlib_compress(&packets);
+
+        client.handle_message(normal_message(
+            ProtocolVersion::COMPRESSED_ZLIB,
+            &compressed,
+        ));
+
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, "first"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, "second"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depacks_brotli_compressed_sub_packets() {
+        let (client, mut receiver) = client_and_receiver();
+        let packets = [packet_bytes(b"first"), packet_bytes(b"second")].concat();
+        let compressed = brotli_compress(&packets);
+
+        client.handle_message(normal_message(
+            ProtocolVersion::COMPRESSED_BROTLI,
+            &compressed,
+        ));
+
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, "first"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, "second"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_compressed_payloads_emit_errors() {
+        let (client, mut receiver) = client_and_receiver();
+
+        client.handle_message(normal_message(
+            ProtocolVersion::COMPRESSED_ZLIB,
+            b"not zlib",
+        ));
+
+        match receiver.try_recv().unwrap() {
+            Event::Error { message } => assert!(message.contains("zlib decompress error")),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depack_stops_after_invalid_sub_packet_header() {
+        let (client, mut receiver) = client_and_receiver();
+        let mut packets = packet_bytes(b"valid");
+        packets.extend_from_slice(&[0; 16]);
+
+        client.depack_sub_packets(&packets);
+
+        match receiver.try_recv().unwrap() {
+            Event::DanmuRaw { payload } => assert_eq!(payload, "valid"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+}

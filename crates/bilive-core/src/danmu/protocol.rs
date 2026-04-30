@@ -142,3 +142,121 @@ pub fn parse_header(view: &[u8]) -> Option<ProtocolHeader> {
         sequence: u32::from_be_bytes(view[12..16].try_into().ok()?),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::codec::{Decoder, Encoder};
+
+    #[test]
+    fn constructs_auth_and_heartbeat_messages() {
+        let auth = Message::auth(9, br#"{"roomid":1}"#.to_vec());
+
+        assert_eq!(auth.header.total_size, 28);
+        assert_eq!(auth.header.header_size, 16);
+        assert_eq!(auth.header.protocol_version, 1);
+        assert_eq!(auth.header.opcode, Opcode::AUTH);
+        assert_eq!(auth.header.sequence, 9);
+        assert_eq!(auth.payload, br#"{"roomid":1}"#);
+
+        let heartbeat = Message::heartbeat(10);
+        assert_eq!(heartbeat.header.total_size, 16);
+        assert_eq!(heartbeat.header.opcode, Opcode::HEARTBEAT);
+        assert_eq!(heartbeat.header.sequence, 10);
+        assert!(heartbeat.payload.is_empty());
+    }
+
+    #[test]
+    fn encodes_and_decodes_a_complete_packet() {
+        let message = Message::auth(42, b"hello".to_vec());
+        let mut codec = ProtocolCodec;
+        let mut buffer = BytesMut::new();
+
+        codec.encode(message, &mut buffer).unwrap();
+        let header = parse_header(&buffer).unwrap();
+        assert_eq!(header.total_size, 21);
+        assert_eq!(header.header_size, 16);
+        assert_eq!(header.opcode, Opcode::AUTH);
+
+        let decoded = codec.decode(&mut buffer).unwrap().unwrap();
+        assert_eq!(decoded.header.sequence, 42);
+        assert_eq!(decoded.payload, b"hello");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn waits_for_more_bytes_when_packet_is_incomplete() {
+        let message = Message::auth(1, b"payload".to_vec());
+        let mut codec = ProtocolCodec;
+        let mut full = BytesMut::new();
+        codec.encode(message, &mut full).unwrap();
+
+        let mut partial = BytesMut::from(&full[..10]);
+        assert!(codec.decode(&mut partial).unwrap().is_none());
+
+        partial.extend_from_slice(&full[10..]);
+        let decoded = codec.decode(&mut partial).unwrap().unwrap();
+        assert_eq!(decoded.payload, b"payload");
+        assert!(partial.is_empty());
+    }
+
+    #[test]
+    fn decodes_packets_with_extended_headers() {
+        let mut buffer = BytesMut::new();
+        buffer.put_u32(23);
+        buffer.put_u16(20);
+        buffer.put_u16(1);
+        buffer.put_u32(Opcode::NORMAL);
+        buffer.put_u32(7);
+        buffer.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        buffer.extend_from_slice(b"abc");
+
+        let decoded = ProtocolCodec.decode(&mut buffer).unwrap().unwrap();
+
+        assert_eq!(decoded.header.header_size, 20);
+        assert_eq!(decoded.header.total_size, 23);
+        assert_eq!(decoded.payload, b"abc");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn rejects_oversized_packets() {
+        let mut buffer = BytesMut::new();
+        buffer.put_u32(10_000_001);
+        buffer.put_u16(16);
+        buffer.put_u16(1);
+        buffer.put_u32(Opcode::NORMAL);
+        buffer.put_u32(1);
+
+        let error = ProtocolCodec.decode(&mut buffer).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_invalid_header_sizes() {
+        let mut short_header = BytesMut::new();
+        short_header.put_u32(16);
+        short_header.put_u16(15);
+        short_header.put_u16(1);
+        short_header.put_u32(Opcode::NORMAL);
+        short_header.put_u32(1);
+
+        let error = ProtocolCodec.decode(&mut short_header).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let mut larger_than_packet = BytesMut::new();
+        larger_than_packet.put_u32(16);
+        larger_than_packet.put_u16(17);
+        larger_than_packet.put_u16(1);
+        larger_than_packet.put_u32(Opcode::NORMAL);
+        larger_than_packet.put_u32(1);
+
+        let error = ProtocolCodec.decode(&mut larger_than_packet).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn parse_header_returns_none_for_short_buffers() {
+        assert!(parse_header(&[0; 15]).is_none());
+    }
+}

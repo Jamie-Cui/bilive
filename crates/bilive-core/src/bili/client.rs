@@ -424,6 +424,26 @@ impl BiliClient {
         .await
     }
 
+    pub async fn danmu_history(&self, room_id: u64) -> BiliResult<Value> {
+        let config = self.config.get().await;
+        let csrf = config.cookie("bili_jct").unwrap_or_default().to_string();
+        self.post_data(
+            LIVE_BASE,
+            "/xlive/web-room/v1/dM/gethistory",
+            Some(LIVE_ORIGIN),
+            Some("https://live.bilibili.com/"),
+            vec![
+                ("roomid", room_id.to_string()),
+                ("room_type", "0".to_string()),
+                ("csrf_token", csrf.clone()),
+                ("csrf", csrf),
+                ("visit_id", String::new()),
+            ],
+            false,
+        )
+        .await
+    }
+
     pub async fn room_admins(&self, page: u64) -> BiliResult<Value> {
         self.get_data(
             LIVE_BASE,

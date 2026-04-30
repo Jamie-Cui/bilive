@@ -38,7 +38,7 @@ packaging/systemd/  # Linux service unit template
 Run the service in the foreground from the repository root:
 
 ```bash
-cargo run -p bilive -- serve --listen 127.0.0.1:22333 --web-dir web
+cargo run -p bilive -- serve --listen 127.0.0.1:22333
 ```
 
 Then open:
@@ -47,17 +47,18 @@ Then open:
 http://127.0.0.1:22333
 ```
 
-The frontend is served directly from `web/`. Edit `web/index.html`,
-`web/styles.css`, or `web/app.js` and refresh the browser.
+By default the frontend is served from static files embedded in the binary.
+During UI development, pass `--web-dir web` to serve files directly from the
+working tree and refresh the browser after edits.
 
 ## CLI Usage
 
 For day-to-day local use, the CLI can manage a background service:
 
 ```bash
-cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web
+cargo run -p bilive -- start --listen 127.0.0.1:22333
 cargo run -p bilive -- status
-cargo run -p bilive -- restart --listen 127.0.0.1:22333 --web-dir web
+cargo run -p bilive -- restart --listen 127.0.0.1:22333
 cargo run -p bilive -- stop
 ```
 
@@ -83,7 +84,8 @@ Useful overrides:
 
 - `--config` or `BILIVE_CONFIG`: config JSON file path.
 - `--listen` or `BILIVE_LISTEN`: service bind address.
-- `--web-dir` or `BILIVE_WEB_DIR`: static UI directory.
+- `--web-dir` or `BILIVE_WEB_DIR`: override the embedded UI with a static UI
+  directory.
 - `--state-dir` or `BILIVE_STATE_DIR`: state directory for background control,
   and the default base directory for `config.json`.
 - `BILIVE_FFMPEG`: `ffmpeg` executable used by the stream test endpoint.
@@ -110,12 +112,10 @@ Build the release binary:
 cargo build --release -p bilive
 ```
 
-Install files with paths matching `packaging/systemd/bilive.service`, for
-example:
+Install the release binary:
 
 ```text
 /usr/local/bin/bilive
-/opt/bilive/web
 ```
 
 Then enable the service:

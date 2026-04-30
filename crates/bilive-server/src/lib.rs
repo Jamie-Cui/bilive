@@ -5,11 +5,12 @@
 use anyhow::{Context, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -23,12 +24,12 @@ use qrcode::{QrCode as SvgQrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     process::Stdio,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -42,7 +43,7 @@ const TEST_STREAM_DURATION_SECONDS: u64 = 5;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
-    pub web_dir: PathBuf,
+    pub web_dir: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
 }
 
@@ -50,6 +51,7 @@ pub struct ServerConfig {
 struct AppState {
     events: broadcast::Sender<Event>,
     danmu_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    danmu_log: Arc<Mutex<DanmuHistory>>,
     bili: BiliClient,
 }
 
@@ -73,6 +75,33 @@ struct ConnectDanmuRequest {
     host: String,
     #[serde(default = "default_danmu_port")]
     port: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct DanmuMessagesResponse {
+    room_id: u64,
+    items: Vec<DanmuHistoryEntry>,
+    total: usize,
+    recent_loaded: usize,
+    recent_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DanmuHistoryEntry {
+    id: String,
+    payload: String,
+    received_at: u64,
+    timeline: Option<String>,
+    source: &'static str,
+    #[serde(skip_serializing)]
+    sort_at: u64,
+}
+
+#[derive(Debug, Default)]
+struct DanmuHistory {
+    room_id: Option<u64>,
+    items: Vec<DanmuHistoryEntry>,
+    seen: HashSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,19 +180,22 @@ fn default_room_silent_level() -> u64 {
 }
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
-    let web_dir = resolve_web_dir(config.web_dir)?;
+    let web_dir = config.web_dir.map(resolve_web_dir).transpose()?;
     let store = ConfigStore::load(config.config_path.clone())
         .await
         .context("failed to load config")?;
     let bili = BiliClient::new(store.clone()).context("failed to create bilibili client")?;
     let (events, _) = broadcast::channel(1024);
+    let danmu_log = Arc::new(Mutex::new(DanmuHistory::default()));
+    spawn_danmu_recorder(events.subscribe(), danmu_log.clone());
     let state = AppState {
         events,
         danmu_task: Arc::new(Mutex::new(None)),
+        danmu_log,
         bili,
     };
 
-    let app = Router::new()
+    let routes = Router::new()
         .route("/api/health", get(health))
         .route("/api/events", get(events_ws))
         .route("/api/config", get(get_config).patch(patch_config))
@@ -210,20 +242,31 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         )
         .route("/api/danmu/connect", post(connect_danmu))
         .route("/api/danmu/disconnect", post(disconnect_danmu))
-        .route("/api/danmu/status", get(danmu_status))
-        .fallback_service(static_service(web_dir.clone()))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .route("/api/danmu/messages", get(danmu_messages))
+        .route("/api/danmu/status", get(danmu_status));
+
+    let app = match &web_dir {
+        Some(web_dir) => routes.fallback_service(static_service(web_dir.clone())),
+        None => routes.fallback(embedded_static),
+    }
+    .layer(TraceLayer::new_for_http())
+    .with_state(state);
 
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.listen))?;
 
-    info!(
-        "bilive listening on http://{} with web dir {}",
-        config.listen,
-        web_dir.display()
-    );
+    match &web_dir {
+        Some(web_dir) => info!(
+            "bilive listening on http://{} with web dir {}",
+            config.listen,
+            web_dir.display()
+        ),
+        None => info!(
+            "bilive listening on http://{} with embedded web UI",
+            config.listen
+        ),
+    }
     info!("config path: {}", store.path().display());
 
     axum::serve(listener, app)
@@ -244,6 +287,329 @@ fn resolve_web_dir(web_dir: PathBuf) -> anyhow::Result<PathBuf> {
     }
     std::fs::canonicalize(&web_dir)
         .with_context(|| format!("failed to resolve web dir {}", web_dir.display()))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EmbeddedAsset {
+    content_type: &'static str,
+    body: &'static [u8],
+}
+
+async fn embedded_static(uri: Uri) -> Response {
+    let asset = embedded_asset(uri.path()).unwrap_or_else(embedded_index_asset);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset.content_type)
+        .body(Body::from(asset.body))
+        .expect("embedded static response is valid")
+}
+
+fn embedded_index_asset() -> EmbeddedAsset {
+    EmbeddedAsset {
+        content_type: "text/html; charset=utf-8",
+        body: include_bytes!("../../../web/index.html"),
+    }
+}
+
+fn embedded_asset(path: &str) -> Option<EmbeddedAsset> {
+    match path.trim_start_matches('/') {
+        "" | "index.html" => Some(embedded_index_asset()),
+        "app.js" => Some(EmbeddedAsset {
+            content_type: "text/javascript; charset=utf-8",
+            body: include_bytes!("../../../web/app.js"),
+        }),
+        "styles.css" => Some(EmbeddedAsset {
+            content_type: "text/css; charset=utf-8",
+            body: include_bytes!("../../../web/styles.css"),
+        }),
+        "favicon.svg" => Some(EmbeddedAsset {
+            content_type: "image/svg+xml",
+            body: include_bytes!("../../../web/favicon.svg"),
+        }),
+        _ => None,
+    }
+}
+
+fn spawn_danmu_recorder(
+    mut events: broadcast::Receiver<Event>,
+    danmu_log: Arc<Mutex<DanmuHistory>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(Event::DanmuRaw { payload }) => {
+                    if let Some(entry) =
+                        DanmuHistoryEntry::from_payload(payload, unix_millis(), None, "live")
+                    {
+                        danmu_log.lock().await.push(entry);
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    warn!("danmu recorder lagged by {count} events");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+impl DanmuHistory {
+    fn reset_for_room(&mut self, room_id: u64) {
+        self.room_id = Some(room_id);
+        self.items.clear();
+        self.seen.clear();
+    }
+
+    fn ensure_room(&mut self, room_id: u64) {
+        if self.room_id != Some(room_id) {
+            self.reset_for_room(room_id);
+        }
+    }
+
+    fn push(&mut self, entry: DanmuHistoryEntry) -> bool {
+        if !self.seen.insert(entry.id.clone()) {
+            return false;
+        }
+
+        self.items.push(entry);
+        self.sort();
+        true
+    }
+
+    fn extend_recent(&mut self, room_id: u64, value: &Value, received_at: u64) -> usize {
+        self.ensure_room(room_id);
+        let mut added = 0;
+        for entry in history_entries(value, received_at) {
+            if self.push(entry) {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    fn snapshot(&self) -> Vec<DanmuHistoryEntry> {
+        self.items.clone()
+    }
+
+    fn sort(&mut self) {
+        self.items.sort_by(|left, right| {
+            let left_at = if left.sort_at == 0 {
+                left.received_at
+            } else {
+                left.sort_at
+            };
+            let right_at = if right.sort_at == 0 {
+                right.received_at
+            } else {
+                right.sort_at
+            };
+            left_at
+                .cmp(&right_at)
+                .then_with(|| left.received_at.cmp(&right.received_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+}
+
+impl DanmuHistoryEntry {
+    fn from_payload(
+        payload: String,
+        received_at: u64,
+        timeline: Option<String>,
+        source: &'static str,
+    ) -> Option<Self> {
+        let parsed = serde_json::from_str::<Value>(&payload).ok()?;
+        if !is_chat_event(&parsed) {
+            return None;
+        }
+
+        let id = danmu_entry_id(&parsed).unwrap_or_else(|| format!("raw:{payload}"));
+        let sort_at = danmu_sort_at(&parsed).unwrap_or(received_at);
+        Some(Self {
+            id,
+            payload,
+            received_at,
+            timeline,
+            source,
+            sort_at,
+        })
+    }
+}
+
+fn history_entries(value: &Value, received_at: u64) -> Vec<DanmuHistoryEntry> {
+    ["admin", "room"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_array))
+        .flat_map(|items| items.iter())
+        .filter_map(|item| history_entry(item, received_at))
+        .collect()
+}
+
+fn history_entry(item: &Value, received_at: u64) -> Option<DanmuHistoryEntry> {
+    let text = item.get("text").and_then(Value::as_str)?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let uid = item.get("uid").and_then(value_as_u64).unwrap_or_default();
+    let nickname = item
+        .get("nickname")
+        .and_then(Value::as_str)
+        .unwrap_or("匿名用户");
+    let color = item
+        .get("color")
+        .or_else(|| item.get("text_color"))
+        .map(value_to_plain_string)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "16777215".to_string());
+    let rnd = item
+        .get("rnd")
+        .map(value_to_plain_string)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            item.get("check_info")
+                .and_then(|value| value.get("ts"))
+                .map(value_to_plain_string)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default();
+    let timeline = item
+        .get("timeline")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let medal = item
+        .get("medal")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let payload = json!({
+        "cmd": "DANMU_MSG",
+        "info": [
+            [0, 1, 25, color, rnd],
+            text,
+            [uid, nickname],
+            medal
+        ],
+    })
+    .to_string();
+
+    DanmuHistoryEntry::from_payload(payload, received_at, timeline, "history")
+}
+
+fn is_chat_event(value: &Value) -> bool {
+    let cmd = value.get("cmd").and_then(Value::as_str).unwrap_or_default();
+    cmd.starts_with("DANMU_MSG") || cmd == "SUPER_CHAT_MESSAGE"
+}
+
+fn danmu_entry_id(value: &Value) -> Option<String> {
+    let cmd = value.get("cmd").and_then(Value::as_str)?;
+    if cmd.starts_with("DANMU_MSG") {
+        let info = value.get("info").and_then(Value::as_array)?;
+        let content = info.get(1).map(value_to_plain_string).unwrap_or_default();
+        let uid = info
+            .get(2)
+            .and_then(Value::as_array)
+            .and_then(|user| user.first())
+            .map(value_to_plain_string)
+            .unwrap_or_default();
+        let rnd = info
+            .first()
+            .and_then(Value::as_array)
+            .and_then(|meta| meta.get(4).or_else(|| meta.get(13)))
+            .map(value_to_plain_string)
+            .unwrap_or_default();
+        if uid.is_empty() && content.is_empty() {
+            return None;
+        }
+        return Some(format!("danmu:{uid}:{content}:{rnd}"));
+    }
+
+    if cmd == "SUPER_CHAT_MESSAGE" {
+        let data = value.get("data")?;
+        let id = data
+            .get("id")
+            .or_else(|| data.get("message_id"))
+            .map(value_to_plain_string)
+            .unwrap_or_default();
+        let uid = data
+            .get("uid")
+            .or_else(|| data.get("user_info").and_then(|value| value.get("uid")))
+            .map(value_to_plain_string)
+            .unwrap_or_default();
+        let message = data
+            .get("message")
+            .map(value_to_plain_string)
+            .unwrap_or_default();
+        if id.is_empty() && uid.is_empty() && message.is_empty() {
+            return None;
+        }
+        return Some(format!("super_chat:{id}:{uid}:{message}"));
+    }
+
+    None
+}
+
+fn danmu_sort_at(value: &Value) -> Option<u64> {
+    let cmd = value.get("cmd").and_then(Value::as_str)?;
+    if cmd.starts_with("DANMU_MSG") {
+        return value
+            .get("info")
+            .and_then(Value::as_array)
+            .and_then(|info| info.first())
+            .and_then(Value::as_array)
+            .and_then(|meta| meta.get(4).or_else(|| meta.get(13)))
+            .and_then(epoch_millis);
+    }
+
+    if cmd == "SUPER_CHAT_MESSAGE" {
+        return value
+            .get("data")
+            .and_then(|data| {
+                data.get("ts")
+                    .or_else(|| data.get("start_time"))
+                    .or_else(|| data.get("time"))
+            })
+            .and_then(epoch_millis);
+    }
+
+    None
+}
+
+fn epoch_millis(value: &Value) -> Option<u64> {
+    let number = value_as_u64(value)?;
+    if number == 0 {
+        return None;
+    }
+    if number >= 100_000_000_000 {
+        Some(number)
+    } else {
+        number.checked_mul(1000)
+    }
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+}
+
+fn value_to_plain_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn unix_millis() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -364,6 +730,10 @@ async fn update_area(
 
 async fn start_live(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut response = state.bili.start_live().await?;
+    if response.get("code").and_then(Value::as_i64) == Some(0) {
+        let room_id = state.bili.config().await.room_id;
+        state.danmu_log.lock().await.reset_for_room(room_id);
+    }
     if requires_face_auth(&response) {
         let config = state.bili.config().await;
         if config.uid != 0 {
@@ -502,6 +872,57 @@ async fn send_comment(
 
 async fn contribution_rank(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(state.bili.contribution_rank().await?))
+}
+
+async fn danmu_messages(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<DanmuMessagesResponse>, ApiError> {
+    let config = state.bili.config().await;
+    let room_id = params
+        .get("room_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(config.room_id);
+    if room_id == 0 {
+        return Err(ApiError::bad_request("missing room_id"));
+    }
+
+    {
+        let mut log = state.danmu_log.lock().await;
+        log.ensure_room(room_id);
+    }
+
+    let include_recent = params
+        .get("include_recent")
+        .is_none_or(|value| value != "0" && value != "false");
+    let mut recent_loaded = 0;
+    let mut recent_error = None;
+
+    if include_recent {
+        match state.bili.danmu_history(room_id).await {
+            Ok(value) => {
+                recent_loaded =
+                    state
+                        .danmu_log
+                        .lock()
+                        .await
+                        .extend_recent(room_id, &value, unix_millis());
+            }
+            Err(error) => {
+                warn!("failed to load recent danmu history: {error}");
+                recent_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let items = state.danmu_log.lock().await.snapshot();
+    Ok(Json(DanmuMessagesResponse {
+        room_id,
+        total: items.len(),
+        items,
+        recent_loaded,
+        recent_error,
+    }))
 }
 
 async fn room_admins(
@@ -652,6 +1073,7 @@ async fn connect_danmu(
         .room_id
         .or_else(|| u32::try_from(config.room_id).ok())
         .ok_or_else(|| ApiError::bad_request("missing room_id"))?;
+    state.danmu_log.lock().await.ensure_room(u64::from(room_id));
     let uid = request.uid.unwrap_or(config.uid);
     let token = request
         .token
@@ -789,6 +1211,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_assets_include_static_ui_files() {
+        let index = embedded_asset("/").unwrap();
+        assert_eq!(index.content_type, "text/html; charset=utf-8");
+        assert!(
+            std::str::from_utf8(index.body)
+                .unwrap()
+                .contains(r#"<script type="module" src="/app.js"></script>"#)
+        );
+
+        assert_eq!(
+            embedded_asset("/app.js").unwrap().content_type,
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            embedded_asset("/styles.css").unwrap().content_type,
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            embedded_asset("/favicon.svg").unwrap().content_type,
+            "image/svg+xml"
+        );
+        assert!(embedded_asset("/missing.txt").is_none());
+    }
+
+    #[test]
     fn keeps_bilibili_query_style_stream_url() {
         let url = stream_url(
             "rtmp://live-push.bilivideo.com/live-bvc/",
@@ -890,6 +1337,59 @@ mod tests {
         assert!(svg.contains("<svg"));
         assert!(svg.contains("#111827"));
         assert!(svg.contains("#ffffff"));
+    }
+
+    #[test]
+    fn converts_recent_history_items_to_danmu_payloads() {
+        let value = json!({
+            "room": [{
+                "text": "你好",
+                "uid": 42,
+                "nickname": "tester",
+                "timeline": "2026-04-30 12:00:00",
+                "rnd": 1780000000u64,
+                "color": 5816798u64,
+                "medal": [12, "牌子"]
+            }]
+        });
+
+        let entries = history_entries(&value, 1000);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "history");
+        assert_eq!(entries[0].timeline.as_deref(), Some("2026-04-30 12:00:00"));
+        assert_eq!(entries[0].id, "danmu:42:你好:1780000000");
+
+        let payload = serde_json::from_str::<Value>(&entries[0].payload).unwrap();
+        assert_eq!(payload["cmd"], "DANMU_MSG");
+        assert_eq!(payload["info"][1], "你好");
+        assert_eq!(payload["info"][2][1], "tester");
+    }
+
+    #[test]
+    fn danmu_history_keeps_unique_entries_sorted_by_message_time() {
+        let early = json!({
+            "cmd": "DANMU_MSG",
+            "info": [[0, 1, 25, 16777215, 100], "early", [1, "a"], []]
+        })
+        .to_string();
+        let late = json!({
+            "cmd": "DANMU_MSG",
+            "info": [[0, 1, 25, 16777215, 200], "late", [2, "b"], []]
+        })
+        .to_string();
+
+        let mut history = DanmuHistory::default();
+        assert!(history.push(DanmuHistoryEntry::from_payload(late, 1, None, "live").unwrap()));
+        assert!(
+            history.push(DanmuHistoryEntry::from_payload(early.clone(), 2, None, "live").unwrap())
+        );
+        assert!(!history.push(DanmuHistoryEntry::from_payload(early, 3, None, "live").unwrap()));
+
+        let items = history.snapshot();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "danmu:1:early:100");
+        assert_eq!(items[1].id, "danmu:2:late:200");
     }
 
     #[test]

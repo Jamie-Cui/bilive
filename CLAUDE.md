@@ -23,7 +23,7 @@ The binary is `bilive` with a `serve` subcommand. CLI args map to env vars below
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BILIVE_LISTEN` | `127.0.0.1:22333` | Server listen address |
-| `BILIVE_WEB_DIR` | `web` | Static frontend directory |
+| `BILIVE_WEB_DIR` | (embedded UI) | Static frontend directory override |
 | `BILIVE_CONFIG` | (none) | Config file path override |
 | `BILIVE_STATE_DIR` | platform default | State directory override |
 | `BILIVE_FFMPEG` | `ffmpeg` | FFmpeg binary path |

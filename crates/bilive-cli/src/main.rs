@@ -10,7 +10,7 @@ use std::{
     fs::{self, OpenOptions},
     net::SocketAddr,
     os::unix::process::CommandExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     time::{Duration, Instant},
 };
@@ -61,8 +61,8 @@ struct ServiceArgs {
     #[arg(long, env = "BILIVE_LISTEN", default_value = DEFAULT_LISTEN)]
     listen: SocketAddr,
 
-    #[arg(long, env = "BILIVE_WEB_DIR", default_value = DEFAULT_WEB_DIR)]
-    web_dir: PathBuf,
+    #[arg(long, env = "BILIVE_WEB_DIR")]
+    web_dir: Option<PathBuf>,
 
     #[arg(long, env = "BILIVE_CONFIG")]
     config: Option<PathBuf>,
@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(args: ServiceArgs) -> anyhow::Result<()> {
-    let web_dir = resolve_web_dir(args.web_dir)?;
+    let web_dir = args.web_dir.map(resolve_web_dir).transpose()?;
     bilive_server::run(bilive_server::ServerConfig {
         listen: args.listen,
         web_dir,
@@ -160,7 +160,12 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         ServiceState::Stopped => {}
     }
 
-    let web_dir = resolve_web_dir(args.service.web_dir.clone())?;
+    let web_dir = args
+        .service
+        .web_dir
+        .clone()
+        .map(resolve_web_dir)
+        .transpose()?;
 
     let log = OpenOptions::new()
         .create(true)
@@ -177,12 +182,14 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         .arg("serve")
         .arg("--listen")
         .arg(args.service.listen.to_string())
-        .arg("--web-dir")
-        .arg(&web_dir)
         .env("BILIVE_STATE_DIR", &paths.state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_for_stderr));
+
+    if let Some(web_dir) = &web_dir {
+        command.arg("--web-dir").arg(web_dir);
+    }
 
     if let Some(config) = &args.service.config {
         command.arg("--config").arg(config);
@@ -306,22 +313,60 @@ fn runtime_paths(args: &ControlArgs) -> anyhow::Result<RuntimePaths> {
 }
 
 fn resolve_web_dir(web_dir: PathBuf) -> anyhow::Result<PathBuf> {
-    let web_dir = if web_dir.is_absolute() {
-        web_dir
-    } else {
-        env::current_dir()
-            .context("failed to resolve current directory")?
-            .join(web_dir)
-    };
-    let index = web_dir.join("index.html");
-    if !index.is_file() {
+    let current_dir = env::current_dir().context("failed to resolve current directory")?;
+    let current_exe = env::current_exe().ok();
+    let requested = requested_web_dir(&web_dir, &current_dir);
+    let Some(web_dir) = locate_web_dir(&web_dir, &current_dir, current_exe.as_deref()) else {
         bail!(
             "web dir {} does not contain index.html; pass --web-dir with the static UI directory",
-            web_dir.display()
+            requested.display()
         );
-    }
+    };
+
     fs::canonicalize(&web_dir)
         .with_context(|| format!("failed to resolve web dir {}", web_dir.display()))
+}
+
+fn requested_web_dir(web_dir: &Path, current_dir: &Path) -> PathBuf {
+    if web_dir.is_absolute() {
+        web_dir.to_path_buf()
+    } else {
+        current_dir.join(web_dir)
+    }
+}
+
+fn locate_web_dir(
+    web_dir: &Path,
+    current_dir: &Path,
+    current_exe: Option<&Path>,
+) -> Option<PathBuf> {
+    let requested = requested_web_dir(web_dir, current_dir);
+    if has_index_html(&requested) {
+        return Some(requested);
+    }
+
+    if web_dir.is_absolute() || web_dir != Path::new(DEFAULT_WEB_DIR) {
+        return None;
+    }
+
+    let exe_dir = current_exe.and_then(Path::parent)?;
+    let adjacent = exe_dir.join(DEFAULT_WEB_DIR);
+    if has_index_html(&adjacent) {
+        return Some(adjacent);
+    }
+
+    for ancestor in exe_dir.ancestors().skip(1) {
+        let candidate = ancestor.join(DEFAULT_WEB_DIR);
+        if ancestor.join("Cargo.toml").is_file() && has_index_html(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn has_index_html(path: &Path) -> bool {
+    path.join("index.html").is_file()
 }
 
 fn default_state_dir() -> anyhow::Result<PathBuf> {
@@ -454,6 +499,11 @@ mod tests {
         }
     }
 
+    fn write_index_html(web_dir: &Path) {
+        fs::create_dir_all(web_dir).unwrap();
+        fs::write(web_dir.join("index.html"), "").unwrap();
+    }
+
     #[test]
     fn runtime_paths_default_files_live_under_state_dir() {
         let state_dir = unique_dir("runtime-defaults");
@@ -481,6 +531,52 @@ mod tests {
         assert_eq!(paths.state_dir, state_dir);
         assert_eq!(paths.pid_file, pid_file);
         assert_eq!(paths.log_file, log_file);
+    }
+
+    #[test]
+    fn locate_web_dir_resolves_relative_paths_from_current_dir() {
+        let dir = unique_dir("web-current-dir");
+        let current_dir = dir.join("cwd");
+        let web_dir = current_dir.join("public");
+        write_index_html(&web_dir);
+
+        let resolved = locate_web_dir(Path::new("public"), &current_dir, None).unwrap();
+
+        assert_eq!(resolved, web_dir);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn locate_web_dir_falls_back_to_repo_web_for_default_path() {
+        let dir = unique_dir("web-default-fallback");
+        let repo_dir = dir.join("repo");
+        let current_dir = repo_dir.join("target").join("debug");
+        let exe = current_dir.join("bilive");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::write(repo_dir.join("Cargo.toml"), "").unwrap();
+        write_index_html(&repo_dir.join(DEFAULT_WEB_DIR));
+
+        let resolved =
+            locate_web_dir(Path::new(DEFAULT_WEB_DIR), &current_dir, Some(&exe)).unwrap();
+
+        assert_eq!(resolved, repo_dir.join(DEFAULT_WEB_DIR));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn locate_web_dir_keeps_non_default_relative_paths_explicit() {
+        let dir = unique_dir("web-explicit-path");
+        let repo_dir = dir.join("repo");
+        let current_dir = repo_dir.join("target").join("debug");
+        let exe = current_dir.join("bilive");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::write(repo_dir.join("Cargo.toml"), "").unwrap();
+        write_index_html(&repo_dir.join(DEFAULT_WEB_DIR));
+
+        let resolved = locate_web_dir(Path::new("public"), &current_dir, Some(&exe));
+
+        assert_eq!(resolved, None);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

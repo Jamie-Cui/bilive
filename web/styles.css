@@ -729,6 +729,11 @@ input:focus, select:focus, textarea:focus {
   min-height: 540px;
 }
 
+.chat-feed {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
 .live-console { min-height: 260px; }
 
 .feed-header {
@@ -740,6 +745,14 @@ input:focus, select:focus, textarea:focus {
 }
 
 .feed-header h3 { margin: 0; }
+
+.feed-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
 .feed-title-group {
   display: grid;
@@ -818,6 +831,19 @@ input:focus, select:focus, textarea:focus {
 
 .chat-list {
   gap: 10px;
+}
+
+.chat-composer {
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-surface);
+}
+
+.chat-composer input {
+  flex: 1;
+  min-width: 0;
 }
 
 .empty-state {
@@ -946,6 +972,20 @@ input:focus, select:focus, textarea:focus {
   height: 10px;
   border-radius: 50%;
   border: 1px solid var(--border);
+}
+
+.danmu-reply {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+.danmu-reply:hover {
+  color: var(--accent-hover);
 }
 
 .danmu-text {
@@ -1146,7 +1186,7 @@ input:focus, select:focus, textarea:focus {
     justify-content: flex-end;
   }
 
-  .btn-row, .inline-form, .danmu-quick-row {
+  .btn-row, .inline-form, .danmu-quick-row, .chat-composer {
     flex-direction: column;
     align-items: stretch;
   }

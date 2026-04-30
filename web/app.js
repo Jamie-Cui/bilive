@@ -7,6 +7,9 @@ const state = {
   authenticated: false,
   danmuConnected: false,
   chatCount: 0,
+  chatLoaded: false,
+  chatMessageIds: new Set(),
+  chatSort: "asc",
   eventCount: 0,
   qrPollTimer: null,
   streamCredentialsVisible: false,
@@ -56,6 +59,8 @@ const els = {
   refreshDanmuToken: $("#refresh-danmu-token"),
   commentMessage: $("#comment-message"),
   sendComment: $("#send-comment"),
+  sortDanmu: $("#sort-danmu"),
+  loadDanmuHistory: $("#load-danmu-history"),
   loadRank: $("#load-rank"),
   clearLogs: $("#clear-logs"),
   chatCount: $("#chat-count"),
@@ -94,6 +99,7 @@ overlay.className = "sidebar-overlay";
 document.body.append(overlay);
 
 bindUi();
+updateDanmuSortButton();
 connectEvents();
 void refreshAll();
 
@@ -141,6 +147,9 @@ function bindUi() {
   els.commentMessage.addEventListener("keydown", (event) => {
     if (event.key === "Enter") { event.preventDefault(); void sendComment(); }
   });
+  els.sortDanmu.addEventListener("click", toggleDanmuSort);
+  els.loadDanmuHistory.addEventListener("click", () => void withLoading(els.loadDanmuHistory, loadDanmuHistory));
+  els.chatList.addEventListener("click", (event) => handleChatListClick(event));
 
   els.loadRank.addEventListener("click", () => void loadRank());
   els.clearLogs.addEventListener("click", clearLogs);
@@ -190,6 +199,9 @@ function switchTab(tab) {
     panel.classList.toggle("active", panel.id === `tab-${tab}`);
   });
   els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", manager: "管理" })[tab] || "bilive";
+  if (tab === "comments" && !state.chatLoaded) {
+    void loadDanmuHistory();
+  }
 }
 
 async function refreshAll() {
@@ -330,6 +342,18 @@ async function sendComment() {
   await api("/api/live/comment", { method: "POST", body: { message } });
   els.commentMessage.value = "";
   toast("弹幕已发送");
+}
+
+async function loadDanmuHistory() {
+  const roomId = Number(els.roomId.value || state.config?.room_id || 0);
+  const result = await api(`/api/danmu/messages?room_id=${encodeURIComponent(roomId)}`);
+  renderDanmuMessages(result.items || []);
+  state.chatLoaded = true;
+  if (result.recent_error) {
+    toast(`已加载本地弹幕，最近历史补全失败: ${result.recent_error}`, true);
+  } else {
+    toast(`已加载 ${result.total || 0} 条本场弹幕`);
+  }
 }
 
 async function loadRank() {
@@ -537,7 +561,7 @@ function appendEvent(event) {
     return;
   }
   const parsed = tryParseJson(payload);
-  if (parsed?.cmd === "DANMU_MSG") {
+  if (String(parsed?.cmd || "").startsWith("DANMU_MSG")) {
     pushDanmuMessage(parseDanmuMessage(parsed), payload, receivedAt);
     return;
   }
@@ -548,18 +572,53 @@ function appendEvent(event) {
   pushSystemEvent(parsed, payload, receivedAt);
 }
 
-function pushDanmuMessage(message, raw, receivedAt) {
+function renderDanmuMessages(items) {
+  state.chatMessageIds = new Set();
+  state.chatCount = 0;
+  els.chatList.replaceChildren();
+
+  for (const entry of sortedDanmuEntries(items)) {
+    const parsed = tryParseJson(entry.payload);
+    if (!parsed) continue;
+    const receivedAt = entry.received_at ? new Date(Number(entry.received_at)) : new Date();
+    const options = { id: entry.id, timeline: entry.timeline || "", scroll: false };
+    if (String(parsed.cmd || "").startsWith("DANMU_MSG")) {
+      pushDanmuMessage(parseDanmuMessage(parsed), entry.payload, receivedAt, options);
+    } else if (parsed.cmd === "SUPER_CHAT_MESSAGE") {
+      pushDanmuMessage(parseSuperChatMessage(parsed), entry.payload, receivedAt, options);
+    }
+  }
+
+  if (state.chatCount === 0) {
+    renderEmpty(els.chatList, "暂无弹幕", "chat");
+  } else if (state.chatSort === "asc") {
+    scrollChatToBottom();
+  } else {
+    scrollChatToTop();
+  }
+  updateDanmuCounters();
+  updateDanmuSortButton();
+}
+
+function pushDanmuMessage(message, raw, receivedAt, options = {}) {
+  const parsed = tryParseJson(raw);
+  const id = options.id || danmuMessageId(parsed, raw);
+  if (id && state.chatMessageIds.has(id)) return false;
+  const shouldStickToEdge = options.scroll !== false && (state.chatSort === "asc" ? isNearBottom(els.chatList) : isNearTop(els.chatList));
+  const previousHeight = els.chatList.scrollHeight;
   const empty = els.chatList.querySelector(".empty-state");
   if (empty) empty.remove();
 
   const item = document.createElement("article");
   item.className = `danmu-message ${message.tone || ""}`;
+  item.dataset.sortAt = String(danmuSortAt(parsed, receivedAt));
   const avatar = document.createElement("div");
   const main = document.createElement("div");
   const meta = document.createElement("div");
   const name = document.createElement("strong");
   const time = document.createElement("time");
   const text = document.createElement("p");
+  const reply = document.createElement("button");
 
   avatar.className = "danmu-avatar";
   avatar.textContent = firstGlyph(message.name);
@@ -567,22 +626,36 @@ function pushDanmuMessage(message, raw, receivedAt) {
   meta.className = "danmu-message-meta";
   name.className = "danmu-name";
   name.textContent = message.name;
-  time.textContent = receivedAt.toLocaleTimeString();
+  time.textContent = options.timeline || receivedAt.toLocaleTimeString();
   text.className = "danmu-text";
   text.textContent = message.content || "(空消息)";
+  reply.className = "danmu-reply";
+  reply.type = "button";
+  reply.dataset.replyTo = message.name;
+  reply.textContent = "回复";
 
   meta.append(name);
   if (message.medal) meta.append(pill(message.medal, "danmu-medal"));
   if (message.price) meta.append(pill(message.price, "danmu-price"));
   if (message.color) meta.append(colorSwatch(message.color));
-  meta.append(time);
+  meta.append(reply, time);
   main.append(meta, text, rawDetails(raw));
   item.append(avatar, main);
-  els.chatList.prepend(item);
+  insertDanmuItem(item);
 
+  if (id) state.chatMessageIds.add(id);
   state.chatCount += 1;
   updateDanmuCounters();
-  while (els.chatList.children.length > 160) els.chatList.lastElementChild.remove();
+  if (options.scroll !== false) {
+    if (state.chatSort === "asc") {
+      if (shouldStickToEdge) scrollChatToBottom();
+    } else if (shouldStickToEdge) {
+      scrollChatToTop();
+    } else {
+      els.chatList.scrollTop += els.chatList.scrollHeight - previousHeight;
+    }
+  }
+  return true;
 }
 
 function pushSystemEvent(parsed, raw, receivedAt) {
@@ -617,8 +690,38 @@ function clearLogs() {
   renderEmpty(els.chatList, "暂无弹幕", "chat");
   renderEmpty(els.systemList, "暂无事件", "system");
   state.chatCount = 0;
+  state.chatLoaded = false;
+  state.chatMessageIds = new Set();
   state.eventCount = 0;
   updateDanmuCounters();
+}
+
+function toggleDanmuSort() {
+  state.chatSort = state.chatSort === "asc" ? "desc" : "asc";
+  const hasMessages = sortRenderedDanmuMessages();
+  updateDanmuSortButton();
+  if (!hasMessages) return;
+  if (state.chatSort === "asc") {
+    scrollChatToBottom();
+  } else {
+    scrollChatToTop();
+  }
+}
+
+function updateDanmuSortButton() {
+  els.sortDanmu.textContent = state.chatSort === "asc" ? "早到晚" : "晚到早";
+  els.sortDanmu.title = state.chatSort === "asc" ? "当前按时间从早到晚排序" : "当前按时间从晚到早排序";
+  els.sortDanmu.dataset.sort = state.chatSort;
+}
+
+function handleChatListClick(event) {
+  const button = event.target.closest("[data-reply-to]");
+  if (!button) return;
+  const name = button.dataset.replyTo || "";
+  const prefix = name ? `@${name} ` : "";
+  els.commentMessage.value = prefix;
+  els.commentMessage.focus();
+  els.commentMessage.setSelectionRange(prefix.length, prefix.length);
 }
 
 function parseDanmuMessage(parsed) {
@@ -648,6 +751,82 @@ function parseSuperChatMessage(parsed) {
     color: normalizeDanmuColor(data.background_color),
     tone: "highlight",
   };
+}
+
+function danmuMessageId(parsed, raw) {
+  const cmd = String(parsed?.cmd || "");
+  if (cmd.startsWith("DANMU_MSG")) {
+    const info = Array.isArray(parsed.info) ? parsed.info : [];
+    const meta = Array.isArray(info[0]) ? info[0] : [];
+    const user = Array.isArray(info[2]) ? info[2] : [];
+    return `danmu:${valueText(user[0])}:${valueText(info[1])}:${valueText(meta[4] ?? meta[13])}`;
+  }
+  if (cmd === "SUPER_CHAT_MESSAGE") {
+    const data = parsed.data || {};
+    const uid = data.uid ?? data.user_info?.uid ?? "";
+    return `super_chat:${valueText(data.id ?? data.message_id)}:${valueText(uid)}:${valueText(data.message)}`;
+  }
+  return raw ? `raw:${raw}` : "";
+}
+
+function sortedDanmuEntries(items) {
+  const entries = Array.isArray(items) ? [...items] : [];
+  entries.sort((left, right) => compareDanmuSortAt(entrySortAt(left), entrySortAt(right)));
+  return entries;
+}
+
+function entrySortAt(entry) {
+  const parsed = tryParseJson(entry?.payload);
+  return danmuSortAt(parsed, entry?.received_at ? new Date(Number(entry.received_at)) : new Date(0));
+}
+
+function insertDanmuItem(item) {
+  if (state.chatSort === "desc") {
+    els.chatList.prepend(item);
+  } else {
+    els.chatList.append(item);
+  }
+}
+
+function sortRenderedDanmuMessages() {
+  const messages = Array.from(els.chatList.querySelectorAll(".danmu-message"));
+  if (messages.length === 0) return false;
+  messages.sort((left, right) => compareDanmuSortAt(Number(left.dataset.sortAt || 0), Number(right.dataset.sortAt || 0)));
+  if (state.chatSort === "desc") messages.reverse();
+  els.chatList.replaceChildren(...messages);
+  return true;
+}
+
+function compareDanmuSortAt(left, right) {
+  const leftValue = Number.isFinite(left) ? left : 0;
+  const rightValue = Number.isFinite(right) ? right : 0;
+  return leftValue - rightValue;
+}
+
+function danmuSortAt(parsed, fallbackDate) {
+  const cmd = String(parsed?.cmd || "");
+  if (cmd.startsWith("DANMU_MSG")) {
+    const info = Array.isArray(parsed.info) ? parsed.info : [];
+    const meta = Array.isArray(info[0]) ? info[0] : [];
+    return epochMillis(meta[4] ?? meta[13]) || fallbackDate.getTime();
+  }
+  if (cmd === "SUPER_CHAT_MESSAGE") {
+    const data = parsed.data || {};
+    return epochMillis(data.ts ?? data.start_time ?? data.time) || fallbackDate.getTime();
+  }
+  return fallbackDate.getTime();
+}
+
+function epochMillis(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number >= 100000000000 ? number : number * 1000;
+}
+
+function valueText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return "";
+  return String(value);
 }
 
 function extractDanmuExtra(meta) {
@@ -728,6 +907,22 @@ function renderEmpty(container, text, kind) {
 function updateDanmuCounters() {
   els.chatCount.textContent = `${state.chatCount} 条`;
   els.eventCount.textContent = `${state.eventCount} 条`;
+}
+
+function isNearBottom(element) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+}
+
+function isNearTop(element) {
+  return element.scrollTop < 48;
+}
+
+function scrollChatToBottom() {
+  els.chatList.scrollTop = els.chatList.scrollHeight;
+}
+
+function scrollChatToTop() {
+  els.chatList.scrollTop = 0;
 }
 
 function firstGlyph(value) {

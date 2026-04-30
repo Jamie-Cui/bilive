@@ -215,12 +215,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
                   <button class="btn btn-ghost btn-sm" id="refresh-danmu-token" type="button">刷新弹幕 Token</button>
                 </div>
               </section>
-              <section class="card send-card">
-                <div class="inline-form">
-                  <input id="comment-message" placeholder="输入弹幕内容，回车发送" />
-                  <button class="btn btn-primary" id="send-comment" type="button">发送</button>
-                </div>
-              </section>
             </div>
 
             <div class="danmu-board">
@@ -230,13 +224,21 @@ SPDX-License-Identifier: GPL-3.0-or-later
                     <h3>聊天弹幕</h3>
                     <span id="chat-count">0 条</span>
                   </div>
-                  <button class="btn btn-ghost btn-sm" id="clear-logs" type="button">清空</button>
+                  <div class="feed-actions">
+                    <button class="btn btn-ghost btn-sm" id="sort-danmu" type="button">早到晚</button>
+                    <button class="btn btn-ghost btn-sm" id="load-danmu-history" type="button">加载本场</button>
+                    <button class="btn btn-ghost btn-sm" id="clear-logs" type="button">清空</button>
+                  </div>
                 </div>
                 <div class="chat-list" id="chat-list">
                   <div class="empty-state">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     <span>暂无弹幕</span>
                   </div>
+                </div>
+                <div class="chat-composer">
+                  <input id="comment-message" placeholder="输入回复内容，回车发送" />
+                  <button class="btn btn-primary" id="send-comment" type="button">发送</button>
                 </div>
               </section>
 

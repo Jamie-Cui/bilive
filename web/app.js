@@ -6,6 +6,8 @@ const state = {
   config: null,
   authenticated: false,
   danmuConnected: false,
+  chatCount: 0,
+  eventCount: 0,
   qrPollTimer: null,
   streamCredentialsVisible: false,
 };
@@ -56,7 +58,10 @@ const els = {
   sendComment: $("#send-comment"),
   loadRank: $("#load-rank"),
   clearLogs: $("#clear-logs"),
-  logList: $("#log-list"),
+  chatCount: $("#chat-count"),
+  eventCount: $("#event-count"),
+  chatList: $("#chat-list"),
+  systemList: $("#system-list"),
   adminUid: $("#admin-uid"),
   addAdmin: $("#add-admin"),
   deleteAdmin: $("#delete-admin"),
@@ -329,7 +334,7 @@ async function sendComment() {
 
 async function loadRank() {
   const result = await api("/api/live/contribution-rank");
-  pushLog("在线榜单", JSON.stringify(result, null, 2), "info");
+  pushSystemLog("在线榜单", JSON.stringify(result, null, 2), "info");
 }
 
 async function managerCall(method, path, body) {
@@ -506,7 +511,8 @@ function connectEvents() {
   });
   socket.addEventListener("error", () => {});
   socket.addEventListener("message", (message) => {
-    const event = JSON.parse(message.data);
+    const event = tryParseJson(message.data);
+    if (!event) return;
     if (event.type === "connection") {
       state.danmuConnected = event.payload === "connected";
       setStatus(els.danmuStatus, state.danmuConnected ? "已连接" : "未连接", state.danmuConnected);
@@ -516,23 +522,78 @@ function connectEvents() {
 }
 
 function appendEvent(event) {
+  const receivedAt = new Date();
   if (event.type === "connection") {
-    pushLog("弹幕连接", event.payload, event.payload === "connected" ? "ok" : "info");
+    pushSystemLog("弹幕连接", connectionLabel(event.payload), event.payload === "connected" ? "ok" : "info", null, receivedAt);
     return;
   }
   if (event.type === "error") {
-    pushLog("服务错误", event.payload.message, "error");
+    pushSystemLog("服务错误", event.payload?.message || "未知错误", "error", null, receivedAt);
     return;
   }
-  const payload = event.payload.payload;
+  const payload = event.payload?.payload;
+  if (!payload) {
+    pushSystemLog("未知事件", JSON.stringify(event), "info", null, receivedAt);
+    return;
+  }
   const parsed = tryParseJson(payload);
-  const title = parsed?.cmd ? `弹幕事件 ${parsed.cmd}` : "弹幕事件";
-  pushLog(title, payload, "info");
+  if (parsed?.cmd === "DANMU_MSG") {
+    pushDanmuMessage(parseDanmuMessage(parsed), payload, receivedAt);
+    return;
+  }
+  if (parsed?.cmd === "SUPER_CHAT_MESSAGE") {
+    pushDanmuMessage(parseSuperChatMessage(parsed), payload, receivedAt);
+    return;
+  }
+  pushSystemEvent(parsed, payload, receivedAt);
 }
 
-function pushLog(title, body, tone) {
-  const empty = els.logList.querySelector(".empty-state");
+function pushDanmuMessage(message, raw, receivedAt) {
+  const empty = els.chatList.querySelector(".empty-state");
   if (empty) empty.remove();
+
+  const item = document.createElement("article");
+  item.className = `danmu-message ${message.tone || ""}`;
+  const avatar = document.createElement("div");
+  const main = document.createElement("div");
+  const meta = document.createElement("div");
+  const name = document.createElement("strong");
+  const time = document.createElement("time");
+  const text = document.createElement("p");
+
+  avatar.className = "danmu-avatar";
+  avatar.textContent = firstGlyph(message.name);
+  main.className = "danmu-message-main";
+  meta.className = "danmu-message-meta";
+  name.className = "danmu-name";
+  name.textContent = message.name;
+  time.textContent = receivedAt.toLocaleTimeString();
+  text.className = "danmu-text";
+  text.textContent = message.content || "(空消息)";
+
+  meta.append(name);
+  if (message.medal) meta.append(pill(message.medal, "danmu-medal"));
+  if (message.price) meta.append(pill(message.price, "danmu-price"));
+  if (message.color) meta.append(colorSwatch(message.color));
+  meta.append(time);
+  main.append(meta, text, rawDetails(raw));
+  item.append(avatar, main);
+  els.chatList.prepend(item);
+
+  state.chatCount += 1;
+  updateDanmuCounters();
+  while (els.chatList.children.length > 160) els.chatList.lastElementChild.remove();
+}
+
+function pushSystemEvent(parsed, raw, receivedAt) {
+  const event = describeSystemEvent(parsed, raw);
+  pushSystemLog(event.title, event.body, event.tone, event.includeRaw === false ? null : raw, receivedAt);
+}
+
+function pushSystemLog(title, body, tone = "info", raw = null, receivedAt = new Date()) {
+  const empty = els.systemList.querySelector(".empty-state");
+  if (empty) empty.remove();
+
   const item = document.createElement("article");
   item.className = `log-item ${tone}`;
   const meta = document.createElement("div");
@@ -540,16 +601,152 @@ function pushLog(title, body, tone) {
   const time = document.createElement("time");
   const pre = document.createElement("pre");
   heading.textContent = title;
-  time.textContent = new Date().toLocaleTimeString();
+  time.textContent = receivedAt.toLocaleTimeString();
   pre.textContent = body;
   meta.append(heading, time);
   item.append(meta, pre);
-  els.logList.prepend(item);
-  while (els.logList.children.length > 160) els.logList.lastElementChild.remove();
+  if (raw) item.append(rawDetails(raw));
+  els.systemList.prepend(item);
+
+  state.eventCount += 1;
+  updateDanmuCounters();
+  while (els.systemList.children.length > 120) els.systemList.lastElementChild.remove();
 }
 
 function clearLogs() {
-  els.logList.innerHTML = '<div class="empty-state"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>暂无事件</span></div>';
+  renderEmpty(els.chatList, "暂无弹幕", "chat");
+  renderEmpty(els.systemList, "暂无事件", "system");
+  state.chatCount = 0;
+  state.eventCount = 0;
+  updateDanmuCounters();
+}
+
+function parseDanmuMessage(parsed) {
+  const info = Array.isArray(parsed.info) ? parsed.info : [];
+  const meta = Array.isArray(info[0]) ? info[0] : [];
+  const user = Array.isArray(info[2]) ? info[2] : [];
+  const medal = Array.isArray(info[3]) ? info[3] : [];
+  const extra = extractDanmuExtra(meta);
+  const medalName = medal[1] ? `${medal[1]} ${medal[0] || ""}`.trim() : "";
+
+  return {
+    name: String(user[1] || extra?.uname || "匿名用户"),
+    content: String(info[1] || extra?.content || ""),
+    medal: medalName,
+    color: normalizeDanmuColor(meta[3] ?? extra?.color),
+    tone: extra?.send_from_me ? "mine" : "",
+  };
+}
+
+function parseSuperChatMessage(parsed) {
+  const data = parsed.data || {};
+  return {
+    name: String(data.user_info?.uname || "匿名用户"),
+    content: String(data.message || ""),
+    medal: "醒目留言",
+    price: data.price ? `¥${data.price}` : "",
+    color: normalizeDanmuColor(data.background_color),
+    tone: "highlight",
+  };
+}
+
+function extractDanmuExtra(meta) {
+  const holder = meta.find((item) => item && typeof item === "object" && typeof item.extra === "string");
+  return holder ? tryParseJson(holder.extra) : null;
+}
+
+function describeSystemEvent(parsed, raw) {
+  if (!parsed) return { title: "原始事件", body: raw.slice(0, 240), tone: "info" };
+
+  const data = parsed.data || {};
+  switch (parsed.cmd) {
+    case "ONLINE_RANK_COUNT":
+      return {
+        title: "在线人数",
+        body: data.online_count_text || data.count_text || `${data.online_count || data.count || 0}`,
+        tone: "ok",
+        includeRaw: false,
+      };
+    case "WATCHED_CHANGE":
+      return { title: "看过人数", body: data.text_large || data.text_small || "已更新", tone: "info", includeRaw: false };
+    case "INTERACT_WORD":
+    case "INTERACT_WORD_V2":
+      return { title: "互动", body: data.uname ? `${data.uname} 进入直播间` : "进入直播间", tone: "info", includeRaw: false };
+    case "SEND_GIFT":
+      return {
+        title: "礼物",
+        body: `${data.uname || "用户"} 送出 ${data.giftName || "礼物"} x${data.num || 1}`,
+        tone: "gift",
+        includeRaw: false,
+      };
+    case "ONLINE_RANK_V3":
+      return { title: "在线榜单", body: "榜单已更新", tone: "info", includeRaw: false };
+    case "STOP_LIVE_ROOM_LIST":
+      return { title: "推荐列表", body: "列表已更新", tone: "info", includeRaw: false };
+    default:
+      return { title: parsed.cmd ? `事件 ${parsed.cmd}` : "系统事件", body: raw.slice(0, 240), tone: "info" };
+  }
+}
+
+function pill(text, className) {
+  const item = document.createElement("span");
+  item.className = className;
+  item.textContent = text;
+  return item;
+}
+
+function colorSwatch(color) {
+  const item = document.createElement("span");
+  item.className = "danmu-color";
+  item.style.backgroundColor = color;
+  item.title = color;
+  return item;
+}
+
+function rawDetails(raw) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const pre = document.createElement("pre");
+  details.className = "raw-details";
+  summary.textContent = "原始数据";
+  pre.textContent = raw;
+  details.append(summary, pre);
+  return details;
+}
+
+function renderEmpty(container, text, kind) {
+  const empty = document.createElement("div");
+  const mark = document.createElement("span");
+  const label = document.createElement("span");
+  empty.className = `empty-state ${kind === "chat" ? "chat-empty" : "system-empty"}`;
+  mark.className = "empty-mark";
+  label.textContent = text;
+  empty.append(mark, label);
+  container.replaceChildren(empty);
+}
+
+function updateDanmuCounters() {
+  els.chatCount.textContent = `${state.chatCount} 条`;
+  els.eventCount.textContent = `${state.eventCount} 条`;
+}
+
+function firstGlyph(value) {
+  return Array.from(String(value || "?").trim())[0] || "?";
+}
+
+function normalizeDanmuColor(value) {
+  if (value === null || value === undefined || value === "" || String(value) === "16777215") return "";
+  if (typeof value === "string" && value.startsWith("#")) return value;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `#${number.toString(16).padStart(6, "0").slice(-6)}`;
+}
+
+function connectionLabel(value) {
+  if (value === "connected") return "已连接";
+  if (value === "connecting") return "连接中";
+  if (value === "disconnected") return "已断开";
+  return String(value || "未知状态");
 }
 
 function showLiveConsoleResult(value) {

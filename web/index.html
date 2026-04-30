@@ -223,21 +223,39 @@ SPDX-License-Identifier: GPL-3.0-or-later
               </section>
             </div>
 
-            <section class="event-feed" aria-label="事件流">
-              <div class="feed-header">
-                <h3>事件流</h3>
-                <div class="btn-row">
-                  <button class="btn btn-ghost btn-sm" id="load-rank" type="button">在线榜单</button>
+            <div class="danmu-board">
+              <section class="event-feed chat-feed" aria-label="聊天弹幕">
+                <div class="feed-header">
+                  <div class="feed-title-group">
+                    <h3>聊天弹幕</h3>
+                    <span id="chat-count">0 条</span>
+                  </div>
                   <button class="btn btn-ghost btn-sm" id="clear-logs" type="button">清空</button>
                 </div>
-              </div>
-              <div class="log-list" id="log-list">
-                <div class="empty-state">
-                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                  <span>暂无事件</span>
+                <div class="chat-list" id="chat-list">
+                  <div class="empty-state">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span>暂无弹幕</span>
+                  </div>
                 </div>
-              </div>
-            </section>
+              </section>
+
+              <section class="event-feed system-feed" aria-label="系统事件">
+                <div class="feed-header">
+                  <div class="feed-title-group">
+                    <h3>系统事件</h3>
+                    <span id="event-count">0 条</span>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" id="load-rank" type="button">在线榜单</button>
+                </div>
+                <div class="log-list system-list" id="system-list">
+                  <div class="empty-state">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 12a9 9 0 0 1-9 9"/><path d="M12 3a9 9 0 0 1 9 9"/><path d="M12 7v5l3 3"/></svg>
+                    <span>暂无事件</span>
+                  </div>
+                </div>
+              </section>
+            </div>
           </section>
 
           <!-- Manager Tab -->

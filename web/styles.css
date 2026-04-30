@@ -117,7 +117,7 @@ button, input, select, textarea { font: inherit; }
 h1 {
   font-size: 20px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 /* ── Nav ── */
@@ -323,7 +323,7 @@ h1 {
 h2 {
   font-size: 18px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   color: var(--text-primary);
 }
 
@@ -369,7 +369,7 @@ h3 {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .card-header {
@@ -429,6 +429,13 @@ h3 {
 
 .send-card {
   padding: 14px 20px;
+}
+
+.danmu-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+  gap: 16px;
+  align-items: stretch;
 }
 
 /* ── Forms ── */
@@ -718,6 +725,10 @@ input:focus, select:focus, textarea:focus {
   min-height: 340px;
 }
 
+.chat-feed, .system-feed {
+  min-height: 540px;
+}
+
 .live-console { min-height: 260px; }
 
 .feed-header {
@@ -729,6 +740,17 @@ input:focus, select:focus, textarea:focus {
 }
 
 .feed-header h3 { margin: 0; }
+
+.feed-title-group {
+  display: grid;
+  gap: 2px;
+}
+
+.feed-title-group span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
 
 .console-body {
   display: grid;
@@ -785,13 +807,17 @@ input:focus, select:focus, textarea:focus {
   word-break: break-word;
 }
 
-/* ── Log List ── */
-.log-list {
+/* ── Danmu Lists ── */
+.chat-list, .log-list {
   overflow-y: auto;
   padding: 12px;
   display: grid;
   gap: 6px;
   align-content: start;
+}
+
+.chat-list {
+  gap: 10px;
 }
 
 .empty-state {
@@ -803,6 +829,131 @@ input:focus, select:focus, textarea:focus {
   color: var(--text-muted);
   font-size: 13px;
   min-height: 200px;
+}
+
+.empty-mark {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  position: relative;
+}
+
+.empty-mark::before, .empty-mark::after {
+  content: "";
+  position: absolute;
+  background: var(--text-muted);
+  border-radius: 999px;
+}
+
+.empty-mark::before {
+  width: 14px;
+  height: 2px;
+  left: 9px;
+  top: 14px;
+}
+
+.empty-mark::after {
+  width: 8px;
+  height: 2px;
+  left: 9px;
+  top: 19px;
+}
+
+.danmu-message {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  padding: 12px;
+  animation: slideIn 0.2s ease;
+}
+
+.danmu-message.highlight {
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg-inset));
+}
+
+.danmu-message.mine {
+  border-left-color: var(--live);
+}
+
+.danmu-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+}
+
+.danmu-message-main {
+  min-width: 0;
+}
+
+.danmu-message-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.danmu-name {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  max-width: min(260px, 48vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.danmu-message time, .danmu-color {
+  flex-shrink: 0;
+}
+
+.danmu-message time {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.danmu-medal, .danmu-price {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+}
+
+.danmu-price {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+  color: var(--warn);
+}
+
+.danmu-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+
+.danmu-text {
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.55;
+  margin-top: 7px;
+  word-break: break-word;
 }
 
 .log-item {
@@ -820,6 +971,7 @@ input:focus, select:focus, textarea:focus {
 
 .log-item.ok { border-left-color: var(--ok); }
 .log-item.error { border-left-color: var(--danger); }
+.log-item.gift { border-left-color: var(--live); }
 
 .log-item > div {
   display: flex;
@@ -851,6 +1003,33 @@ input:focus, select:focus, textarea:focus {
   word-break: break-word;
   overflow: auto;
   max-height: 200px;
+}
+
+.raw-details {
+  margin-top: 8px;
+}
+
+.raw-details summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+}
+
+.raw-details pre {
+  background: color-mix(in srgb, var(--bg-base) 55%, var(--bg-inset));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ── Toasts ── */
@@ -932,6 +1111,10 @@ input:focus, select:focus, textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .danmu-board {
+    grid-template-columns: 1fr;
+  }
+
   .workspace {
     padding: 16px;
   }
@@ -946,6 +1129,10 @@ input:focus, select:focus, textarea:focus {
 
   .face-auth-panel {
     grid-template-columns: 1fr;
+  }
+
+  .chat-feed, .system-feed {
+    min-height: 420px;
   }
 }
 
@@ -973,5 +1160,21 @@ input:focus, select:focus, textarea:focus {
 
   .status-strip {
     grid-template-columns: 1fr;
+  }
+
+  .danmu-message {
+    grid-template-columns: 32px minmax(0, 1fr);
+    padding: 10px;
+  }
+
+  .danmu-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
+  }
+
+  .danmu-message time {
+    margin-left: 0;
+    width: 100%;
   }
 }

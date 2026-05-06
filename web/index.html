@@ -41,6 +41,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             弹幕
           </button>
+          <button data-tab="vtuber" type="button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M8 7V5a4 4 0 0 1 8 0v2"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M10 17h4"/></svg>
+            VTuber
+          </button>
           <button data-tab="manager" type="button">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             管理
@@ -56,6 +60,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
           </div>
           <div class="status-dot" id="danmu-status" data-label="弹幕">
             <span class="dot"></span><span class="status-text">未连接</span>
+          </div>
+          <div class="status-dot" id="vtuber-status" data-label="形象">
+            <span class="dot"></span><span class="status-text">未启动</span>
           </div>
         </div>
         <div class="sidebar-footer">
@@ -281,6 +288,114 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 </div>
               </section>
             </div>
+          </section>
+
+          <!-- VTuber Tab -->
+          <section class="tab-panel" id="tab-vtuber">
+            <section class="card">
+              <div class="card-header">
+                <h3>运行状态</h3>
+                <span class="status-badge" id="vtuber-runtime-status">未配置</span>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-primary" id="save-vtuber" type="button">保存设置</button>
+                <button class="btn btn-live" id="start-vtuber" type="button">
+                  <span class="live-dot"></span>启动形象
+                </button>
+                <button class="btn btn-danger" id="stop-vtuber" type="button">停止形象</button>
+                <button class="btn btn-ghost btn-sm" id="refresh-vtuber" type="button">刷新状态</button>
+              </div>
+              <pre class="raw-output compact-output" id="vtuber-output">暂无数据</pre>
+            </section>
+
+            <section class="card">
+              <h3>EasyVtuber 运行参数</h3>
+              <div class="form-grid">
+                <label>
+                  <span class="label-text">运行目录</span>
+                  <input id="vtuber-runtime-dir" placeholder="/home/jamie/proj/EasyVtuber 或 Windows 解压目录" />
+                </label>
+                <label>
+                  <span class="label-text">Python</span>
+                  <input id="vtuber-python" placeholder="python" />
+                </label>
+                <label>
+                  <span class="label-text">角色名</span>
+                  <input id="vtuber-character" placeholder="lambda_00" />
+                </label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span class="label-text">输入</span>
+                  <select id="vtuber-input-mode">
+                    <option value="mouse">鼠标/音频</option>
+                    <option value="ifacialmocap">iFacialMocap</option>
+                    <option value="openseeface">OpenSeeFace</option>
+                    <option value="camera">摄像头</option>
+                    <option value="debug">调试输入</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="label-text">输入地址</span>
+                  <input id="vtuber-input-address" placeholder="iPhone IP 或 127.0.0.1:11573" />
+                </label>
+                <label>
+                  <span class="label-text">输出</span>
+                  <select id="vtuber-output-mode">
+                    <option value="debug">调试窗口</option>
+                    <option value="spout2">Spout2</option>
+                    <option value="virtual_cam">OBS 虚拟摄像头</option>
+                  </select>
+                </label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span class="label-text">模型</span>
+                  <input id="vtuber-model-select" placeholder="v3_seperable_half / tha4 / tha4_student_name" />
+                </label>
+                <label>
+                  <span class="label-text">FPS</span>
+                  <input id="vtuber-frame-rate" type="number" min="1" max="240" step="1" />
+                </label>
+                <label class="check-row check-row-card">
+                  <input id="vtuber-use-tensorrt" type="checkbox" />
+                  <span>TensorRT</span>
+                </label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span class="label-text">补帧</span>
+                  <input id="vtuber-interpolation" placeholder="Off / x2_half / x3_half / x4_half" />
+                </label>
+                <label>
+                  <span class="label-text">超分</span>
+                  <input id="vtuber-super-resolution" placeholder="Off / waifu2x_x2_half / realesrgan_x4_half / anime4k" />
+                </label>
+                <label>
+                  <span class="label-text">输入简化</span>
+                  <input id="vtuber-cache-simplify" type="number" min="0" max="16" step="1" />
+                </label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span class="label-text">RAM 缓存</span>
+                  <input id="vtuber-ram-cache" placeholder="2gb" />
+                </label>
+                <label>
+                  <span class="label-text">VRAM 缓存</span>
+                  <input id="vtuber-vram-cache" placeholder="2gb" />
+                </label>
+                <label>
+                  <span class="label-text">额外参数</span>
+                  <input id="vtuber-extra-args" placeholder="例如 --alpha_clean --eyebrow" />
+                </label>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>后端判断</h3>
+              <div class="architecture-note" id="vtuber-architecture-note">加载中</div>
+            </section>
           </section>
 
           <!-- Manager Tab -->

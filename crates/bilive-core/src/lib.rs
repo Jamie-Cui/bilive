@@ -7,5 +7,7 @@ pub mod config;
 pub mod danmu;
 pub mod event;
 
-pub use config::{AppConfig, AppCookie, ConfigStore, DanmuNotificationConfig, StreamCredential};
+pub use config::{
+    AppConfig, AppCookie, ConfigStore, DanmuNotificationConfig, StreamCredential, VtuberConfig,
+};
 pub use event::{ConnectionStatus, Event};

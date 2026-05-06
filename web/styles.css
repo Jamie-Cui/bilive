@@ -845,6 +845,54 @@ input:focus, select:focus, textarea:focus {
   word-break: break-word;
 }
 
+.compact-output {
+  min-height: 90px;
+}
+
+.status-badge {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+}
+
+.status-badge.ready {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.status-badge.ok {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  color: var(--ok);
+}
+
+.check-row-card {
+  align-self: end;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.architecture-note {
+  color: var(--text-secondary);
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.architecture-note strong {
+  color: var(--text-primary);
+}
+
+.architecture-note p {
+  margin: 0;
+}
+
 /* ── Danmu Lists ── */
 .chat-list, .log-list {
   overflow-y: auto;

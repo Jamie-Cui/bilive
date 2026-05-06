@@ -54,6 +54,50 @@ impl Default for DanmuNotificationConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct VtuberConfig {
+    pub enabled: bool,
+    pub runtime_dir: String,
+    pub python: String,
+    pub character: String,
+    pub input_mode: String,
+    pub input_address: String,
+    pub output_mode: String,
+    pub model_select: String,
+    pub use_tensorrt: bool,
+    pub frame_rate_limit: u32,
+    pub interpolation: String,
+    pub super_resolution: String,
+    pub ram_cache_size: String,
+    pub vram_cache_size: String,
+    pub cache_simplify: u32,
+    pub extra_args: Vec<String>,
+}
+
+impl Default for VtuberConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            runtime_dir: String::new(),
+            python: "python".to_string(),
+            character: "lambda_00".to_string(),
+            input_mode: "mouse".to_string(),
+            input_address: String::new(),
+            output_mode: "debug".to_string(),
+            model_select: "v3_seperable_half".to_string(),
+            use_tensorrt: false,
+            frame_rate_limit: 30,
+            interpolation: "Off".to_string(),
+            super_resolution: "Off".to_string(),
+            ram_cache_size: "2gb".to_string(),
+            vram_cache_size: "2gb".to_string(),
+            cache_simplify: 3,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -74,6 +118,7 @@ pub struct AppConfig {
     pub is_open_live: bool,
     pub streams: Vec<StreamCredential>,
     pub danmu_notifications: DanmuNotificationConfig,
+    pub vtuber: VtuberConfig,
 }
 
 impl Default for AppConfig {
@@ -96,6 +141,7 @@ impl Default for AppConfig {
             is_open_live: false,
             streams: Vec::new(),
             danmu_notifications: DanmuNotificationConfig::default(),
+            vtuber: VtuberConfig::default(),
         }
     }
 }
@@ -158,6 +204,7 @@ struct UserConfig {
     category_id: String,
     area_id: String,
     danmu_notifications: DanmuNotificationConfig,
+    vtuber: VtuberConfig,
 }
 
 impl Default for UserConfig {
@@ -168,6 +215,7 @@ impl Default for UserConfig {
             category_id: String::new(),
             area_id: String::new(),
             danmu_notifications: DanmuNotificationConfig::default(),
+            vtuber: VtuberConfig::default(),
         }
     }
 }
@@ -180,6 +228,7 @@ impl From<&AppConfig> for UserConfig {
             category_id: config.category_id.clone(),
             area_id: config.area_id.clone(),
             danmu_notifications: config.danmu_notifications.clone(),
+            vtuber: config.vtuber.clone(),
         }
     }
 }
@@ -191,6 +240,7 @@ impl UserConfig {
         config.category_id = self.category_id;
         config.area_id = self.area_id;
         config.danmu_notifications = self.danmu_notifications;
+        config.vtuber = self.vtuber;
     }
 }
 

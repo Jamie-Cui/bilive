@@ -15,7 +15,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use bilive_core::{
-    ConfigStore, Event,
+    ConfigStore, Event, VtuberConfig,
     bili::{BiliClient, BiliError},
     danmu::{DanmuClient, DanmuConnectOptions},
 };
@@ -26,12 +26,12 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle};
 use tower_http::services::{ServeDir, ServeFile};
@@ -53,6 +53,7 @@ struct AppState {
     events: broadcast::Sender<Event>,
     danmu_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     danmu_log: Arc<Mutex<DanmuHistory>>,
+    vtuber_process: Arc<Mutex<Option<VtuberProcess>>>,
     bili: BiliClient,
 }
 
@@ -65,6 +66,33 @@ struct HealthResponse {
 #[derive(Debug, Serialize)]
 struct DanmuStatusResponse {
     connected: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct VtuberStatusResponse {
+    configured: bool,
+    enabled: bool,
+    running: bool,
+    pid: Option<u32>,
+    command: Vec<String>,
+    recommendation: VtuberRecommendation,
+}
+
+#[derive(Debug, Serialize)]
+struct VtuberRecommendation {
+    rust_rewrite: &'static str,
+    merge_into_bilive: &'static str,
+    rationale: Vec<&'static str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VtuberConfigRequest {
+    config: VtuberConfig,
+}
+
+struct VtuberProcess {
+    child: Child,
+    command: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +225,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         events,
         danmu_task: Arc::new(Mutex::new(None)),
         danmu_log,
+        vtuber_process: Arc::new(Mutex::new(None)),
         bili,
     };
 
@@ -248,7 +277,12 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/danmu/connect", post(connect_danmu))
         .route("/api/danmu/disconnect", post(disconnect_danmu))
         .route("/api/danmu/messages", get(danmu_messages))
-        .route("/api/danmu/status", get(danmu_status));
+        .route("/api/danmu/status", get(danmu_status))
+        .route("/api/vtuber/status", get(vtuber_status))
+        .route("/api/vtuber/config", post(save_vtuber_config))
+        .route("/api/vtuber/start", post(start_vtuber))
+        .route("/api/vtuber/stop", post(stop_vtuber))
+        .route("/api/vtuber/recommendation", get(vtuber_recommendation));
 
     let app = match &web_dir {
         Some(web_dir) => routes.fallback_service(static_service(web_dir.clone())),
@@ -1319,6 +1353,292 @@ async fn danmu_status(State(state): State<AppState>) -> Json<DanmuStatusResponse
     })
 }
 
+async fn vtuber_status(State(state): State<AppState>) -> Json<VtuberStatusResponse> {
+    Json(vtuber_status_response(&state).await)
+}
+
+async fn save_vtuber_config(
+    State(state): State<AppState>,
+    Json(request): Json<VtuberConfigRequest>,
+) -> Result<Json<VtuberStatusResponse>, ApiError> {
+    let config = sanitize_vtuber_config(request.config);
+    state
+        .bili
+        .patch_config(json!({ "vtuber": config }))
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(vtuber_status_response(&state).await))
+}
+
+async fn start_vtuber(
+    State(state): State<AppState>,
+) -> Result<Json<VtuberStatusResponse>, ApiError> {
+    let config = state.bili.config().await.vtuber;
+    let command = vtuber_command(&config)?;
+    let mut process = state.vtuber_process.lock().await;
+
+    if let Some(running) = process.as_mut() {
+        if running.child.try_wait().map_err(vtuber_io_error)?.is_none() {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: "VTuber runtime is already running".to_string(),
+            });
+        }
+    }
+
+    let mut child = Command::new(&command[0]);
+    child
+        .args(&command[1..])
+        .current_dir(&config.runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(false);
+
+    let child = child
+        .spawn()
+        .map_err(|error| ApiError::bad_request(format!("启动 VTuber 运行时失败: {error}")))?;
+
+    *process = Some(VtuberProcess { child, command });
+    drop(process);
+    Ok(Json(vtuber_status_response(&state).await))
+}
+
+async fn stop_vtuber(
+    State(state): State<AppState>,
+) -> Result<Json<VtuberStatusResponse>, ApiError> {
+    let mut process = state.vtuber_process.lock().await;
+    if let Some(mut running) = process.take() {
+        if running.child.try_wait().map_err(vtuber_io_error)?.is_none() {
+            running.child.kill().await.map_err(vtuber_io_error)?;
+        }
+    }
+    drop(process);
+    Ok(Json(vtuber_status_response(&state).await))
+}
+
+async fn vtuber_recommendation() -> Json<VtuberRecommendation> {
+    Json(vtuber_architecture_recommendation())
+}
+
+async fn vtuber_status_response(state: &AppState) -> VtuberStatusResponse {
+    let config = state.bili.config().await.vtuber;
+    let command = vtuber_command(&config).unwrap_or_default();
+    let mut process = state.vtuber_process.lock().await;
+    let mut running = false;
+    let mut pid = None;
+    let mut clear_process = false;
+
+    if let Some(process) = process.as_mut() {
+        match process.child.try_wait() {
+            Ok(None) => {
+                running = true;
+                pid = process.child.id();
+            }
+            Ok(Some(_)) | Err(_) => {
+                clear_process = true;
+            }
+        }
+    }
+
+    if clear_process {
+        *process = None;
+    }
+
+    let command = process
+        .as_ref()
+        .map(|process| process.command.clone())
+        .filter(|_| running)
+        .unwrap_or(command);
+
+    VtuberStatusResponse {
+        configured: vtuber_is_configured(&config),
+        enabled: config.enabled,
+        running,
+        pid,
+        command,
+        recommendation: vtuber_architecture_recommendation(),
+    }
+}
+
+fn sanitize_vtuber_config(mut config: VtuberConfig) -> VtuberConfig {
+    config.runtime_dir = config.runtime_dir.trim().to_string();
+    config.python = non_empty_or(config.python.trim(), "python");
+    config.character = non_empty_or(config.character.trim(), "lambda_00");
+    config.input_mode = match config.input_mode.as_str() {
+        "ifacialmocap" | "camera" | "debug" | "mouse" | "openseeface" => config.input_mode,
+        _ => "mouse".to_string(),
+    };
+    config.output_mode = match config.output_mode.as_str() {
+        "spout2" | "virtual_cam" | "debug" => config.output_mode,
+        _ => "debug".to_string(),
+    };
+    config.model_select = non_empty_or(config.model_select.trim(), "v3_seperable_half");
+    config.frame_rate_limit = config.frame_rate_limit.clamp(1, 240);
+    config.interpolation = non_empty_or(config.interpolation.trim(), "Off");
+    config.super_resolution = non_empty_or(config.super_resolution.trim(), "Off");
+    config.ram_cache_size = non_empty_or(config.ram_cache_size.trim(), "2gb");
+    config.vram_cache_size = non_empty_or(config.vram_cache_size.trim(), "2gb");
+    config.cache_simplify = config.cache_simplify.min(16);
+    config.extra_args.retain(|arg| !arg.trim().is_empty());
+    config
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn vtuber_command(config: &VtuberConfig) -> Result<Vec<String>, ApiError> {
+    if config.runtime_dir.trim().is_empty() {
+        return Err(ApiError::bad_request("请先设置 EasyVtuber 运行目录"));
+    }
+    let runtime_dir = FsPath::new(&config.runtime_dir);
+    if !runtime_dir.join("src").join("main.py").is_file() {
+        return Err(ApiError::bad_request(
+            "EasyVtuber 运行目录下没有找到 src/main.py",
+        ));
+    }
+
+    let mut args = vec![
+        config.python.clone(),
+        "-m".to_string(),
+        "src.main".to_string(),
+    ];
+    args.extend(["--character".to_string(), config.character.clone()]);
+
+    match config.input_mode.as_str() {
+        "ifacialmocap" => {
+            if !config.input_address.is_empty() {
+                args.extend([
+                    "--ifm_input".to_string(),
+                    ifm_address(&config.input_address),
+                ]);
+            }
+        }
+        "camera" => args.push("--cam_input".to_string()),
+        "debug" => args.push("--debug_input".to_string()),
+        "openseeface" => {
+            if !config.input_address.is_empty() {
+                args.extend(["--osf_input".to_string(), config.input_address.clone()]);
+            }
+        }
+        _ => args.extend(["--mouse_input".to_string(), "0,0,1920,1080".to_string()]),
+    }
+
+    match config.output_mode.as_str() {
+        "spout2" => args.push("--output_spout2".to_string()),
+        "virtual_cam" => args.push("--output_virtual_cam".to_string()),
+        _ => args.push("--output_debug".to_string()),
+    }
+
+    args.extend(["--simplify".to_string(), config.cache_simplify.to_string()]);
+    args.extend(["--cache".to_string(), config.ram_cache_size.clone()]);
+    args.extend(["--gpu_cache".to_string(), config.vram_cache_size.clone()]);
+    apply_interpolation_args(&mut args, &config.interpolation);
+    apply_model_args(&mut args, &config.model_select);
+    args.extend([
+        "--frame_rate_limit".to_string(),
+        config.frame_rate_limit.to_string(),
+    ]);
+    apply_super_resolution_args(&mut args, &config.super_resolution);
+    if config.use_tensorrt {
+        args.push("--use_tensorrt".to_string());
+    }
+    args.extend(config.extra_args.clone());
+    Ok(args)
+}
+
+fn ifm_address(value: &str) -> String {
+    if value.contains(':') {
+        value.to_string()
+    } else {
+        format!("{value}:49983")
+    }
+}
+
+fn apply_interpolation_args(args: &mut Vec<String>, value: &str) {
+    if value == "Off" {
+        return;
+    }
+    args.push("--use_interpolation".to_string());
+    if value.contains("half") {
+        args.push("--interpolation_half".to_string());
+    }
+    let scale = if value.contains("x4") {
+        Some("4")
+    } else if value.contains("x3") {
+        Some("3")
+    } else if value.contains("x2") {
+        Some("2")
+    } else {
+        None
+    };
+    if let Some(scale) = scale {
+        args.extend(["--interpolation_scale".to_string(), scale.to_string()]);
+    }
+}
+
+fn apply_model_args(args: &mut Vec<String>, value: &str) {
+    if let Some(model_name) = value.strip_prefix("tha4_student_") {
+        args.extend(["--model_version".to_string(), "v4_student".to_string()]);
+        args.extend(["--model_name".to_string(), model_name.to_string()]);
+    } else if value.contains("tha4") || value.contains("v4") {
+        args.extend(["--model_version".to_string(), "v4".to_string()]);
+    } else {
+        args.extend(["--model_version".to_string(), "v3".to_string()]);
+    }
+
+    if value.contains("seperable") || value.contains("separable") {
+        args.push("--model_seperable".to_string());
+    }
+    if value.contains("half") {
+        args.push("--model_half".to_string());
+    }
+}
+
+fn apply_super_resolution_args(args: &mut Vec<String>, value: &str) {
+    if value == "Off" {
+        return;
+    }
+    args.push("--use_sr".to_string());
+    if value.contains("anime4k") {
+        args.push("--sr_a4k".to_string());
+    }
+    if value.contains("x4") {
+        args.push("--sr_x4".to_string());
+    }
+    if value.contains("half") {
+        args.push("--sr_half".to_string());
+    }
+}
+
+fn vtuber_is_configured(config: &VtuberConfig) -> bool {
+    !config.runtime_dir.trim().is_empty()
+}
+
+fn vtuber_architecture_recommendation() -> VtuberRecommendation {
+    VtuberRecommendation {
+        rust_rewrite: "不建议现在完整重写",
+        merge_into_bilive: "建议先并入控制面，不并入推理运行时",
+        rationale: vec![
+            "EasyVtuber 的核心依赖 PyTorch、ONNX Runtime、DirectML、TensorRT、OpenCV、Mediapipe、Spout/虚拟摄像头和大量模型文件。",
+            "Rust 重写推理管线会重做模型加载、GPU 后端、图像处理、面捕输入和输出插件适配，风险远高于网页控制集成。",
+            "bilive 二进制适合负责配置、启动/停止、状态展示和直播流程编排；VTuber 推理进程继续独立运行，未启用时不影响 bilive。",
+        ],
+    }
+}
+
+fn vtuber_io_error(error: std::io::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: error.to_string(),
+    }
+}
+
 fn public_config(config: bilive_core::AppConfig) -> Value {
     json!({
         "area_list": config.area_list,
@@ -1334,6 +1654,7 @@ fn public_config(config: bilive_core::AppConfig) -> Value {
         "is_open_live": config.is_open_live,
         "streams": config.streams,
         "danmu_notifications": config.danmu_notifications,
+        "vtuber": config.vtuber,
     })
 }
 
@@ -1514,6 +1835,31 @@ mod tests {
         assert!(value.get("csrf").is_none());
         assert!(value.get("room_token").is_none());
         assert!(!value.to_string().contains("room-token-secret"));
+    }
+
+    #[test]
+    fn public_config_exposes_disabled_vtuber_defaults() {
+        let value = public_config(bilive_core::AppConfig::default());
+
+        assert_eq!(value["vtuber"]["enabled"], false);
+        assert_eq!(value["vtuber"]["runtime_dir"], "");
+        assert_eq!(value["vtuber"]["python"], "python");
+    }
+
+    #[test]
+    fn vtuber_command_requires_runtime_dir_before_start() {
+        let error = vtuber_command(&bilive_core::VtuberConfig::default()).unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("EasyVtuber"));
+    }
+
+    #[test]
+    fn vtuber_architecture_recommends_control_plane_integration() {
+        let recommendation = vtuber_architecture_recommendation();
+
+        assert_eq!(recommendation.rust_rewrite, "不建议现在完整重写");
+        assert!(recommendation.merge_into_bilive.contains("控制面"));
     }
 
     #[test]

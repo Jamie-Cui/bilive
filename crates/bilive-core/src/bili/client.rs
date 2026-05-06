@@ -714,6 +714,9 @@ impl BiliClient {
                 if let Some(value) = patch.get("danmu_notifications") {
                     patch_danmu_notifications(&mut config.danmu_notifications, value);
                 }
+                if let Some(value) = patch.get("vtuber") {
+                    patch_vtuber_config(&mut config.vtuber, value);
+                }
             })
             .await?)
     }
@@ -1026,6 +1029,63 @@ fn patch_danmu_notifications(config: &mut crate::DanmuNotificationConfig, patch:
     }
     if let Some(value) = patch.get("expire_timeout_ms").and_then(Value::as_u64) {
         config.expire_timeout_ms = value.min(3_600_000);
+    }
+}
+
+fn patch_vtuber_config(config: &mut crate::VtuberConfig, patch: &Value) {
+    if let Some(value) = patch.get("enabled").and_then(Value::as_bool) {
+        config.enabled = value;
+    }
+    if let Some(value) = patch.get("runtime_dir").and_then(Value::as_str) {
+        config.runtime_dir = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("python").and_then(Value::as_str) {
+        config.python = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("character").and_then(Value::as_str) {
+        config.character = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("input_mode").and_then(Value::as_str) {
+        config.input_mode = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("input_address").and_then(Value::as_str) {
+        config.input_address = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("output_mode").and_then(Value::as_str) {
+        config.output_mode = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("model_select").and_then(Value::as_str) {
+        config.model_select = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("use_tensorrt").and_then(Value::as_bool) {
+        config.use_tensorrt = value;
+    }
+    if let Some(value) = patch.get("frame_rate_limit").and_then(Value::as_u64) {
+        config.frame_rate_limit = value.clamp(1, 240) as u32;
+    }
+    if let Some(value) = patch.get("interpolation").and_then(Value::as_str) {
+        config.interpolation = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("super_resolution").and_then(Value::as_str) {
+        config.super_resolution = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("ram_cache_size").and_then(Value::as_str) {
+        config.ram_cache_size = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("vram_cache_size").and_then(Value::as_str) {
+        config.vram_cache_size = value.trim().to_string();
+    }
+    if let Some(value) = patch.get("cache_simplify").and_then(Value::as_u64) {
+        config.cache_simplify = value.min(16) as u32;
+    }
+    if let Some(values) = patch.get("extra_args").and_then(Value::as_array) {
+        config.extra_args = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
     }
 }
 

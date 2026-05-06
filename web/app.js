@@ -6,6 +6,7 @@ const state = {
   config: null,
   authenticated: false,
   danmuConnected: false,
+  vtuberRunning: false,
   chatCount: 0,
   chatLoaded: false,
   chatMessageIds: new Set(),
@@ -24,6 +25,7 @@ const els = {
   serviceStatus: $("#service-status"),
   authStatus: $("#auth-status"),
   danmuStatus: $("#danmu-status"),
+  vtuberStatus: $("#vtuber-status"),
   pageTitle: $("#page-title"),
   configPath: $("#config-path"),
   profile: $("#profile"),
@@ -95,6 +97,28 @@ const els = {
   deleteBlocked: $("#delete-blocked"),
   loadBlocked: $("#load-blocked"),
   managerOutput: $("#manager-output"),
+  vtuberRuntimeStatus: $("#vtuber-runtime-status"),
+  vtuberOutput: $("#vtuber-output"),
+  vtuberRuntimeDir: $("#vtuber-runtime-dir"),
+  vtuberPython: $("#vtuber-python"),
+  vtuberCharacter: $("#vtuber-character"),
+  vtuberInputMode: $("#vtuber-input-mode"),
+  vtuberInputAddress: $("#vtuber-input-address"),
+  vtuberOutputMode: $("#vtuber-output-mode"),
+  vtuberModelSelect: $("#vtuber-model-select"),
+  vtuberFrameRate: $("#vtuber-frame-rate"),
+  vtuberUseTensorrt: $("#vtuber-use-tensorrt"),
+  vtuberInterpolation: $("#vtuber-interpolation"),
+  vtuberSuperResolution: $("#vtuber-super-resolution"),
+  vtuberCacheSimplify: $("#vtuber-cache-simplify"),
+  vtuberRamCache: $("#vtuber-ram-cache"),
+  vtuberVramCache: $("#vtuber-vram-cache"),
+  vtuberExtraArgs: $("#vtuber-extra-args"),
+  saveVtuber: $("#save-vtuber"),
+  startVtuber: $("#start-vtuber"),
+  stopVtuber: $("#stop-vtuber"),
+  refreshVtuber: $("#refresh-vtuber"),
+  vtuberArchitectureNote: $("#vtuber-architecture-note"),
   themeLight: $("#theme-light"),
   themeDark: $("#theme-dark"),
   toasts: $("#toasts"),
@@ -177,6 +201,10 @@ function bindUi() {
   els.addBlocked.addEventListener("click", () => void managerCall("POST", "/api/manager/blocked-words", { keyword: els.blockedKeyword.value }));
   els.deleteBlocked.addEventListener("click", () => void managerCall("POST", "/api/manager/blocked-words/delete", { keyword: els.blockedKeyword.value }));
   els.loadBlocked.addEventListener("click", () => void managerCall("GET", "/api/manager/blocked-words"));
+  els.saveVtuber.addEventListener("click", () => void withLoading(els.saveVtuber, saveVtuber));
+  els.startVtuber.addEventListener("click", () => void withLoading(els.startVtuber, startVtuber));
+  els.stopVtuber.addEventListener("click", () => void withLoading(els.stopVtuber, stopVtuber));
+  els.refreshVtuber.addEventListener("click", () => void withLoading(els.refreshVtuber, refreshVtuber));
   [els.themeLight, els.themeDark].forEach((button) => {
     button.addEventListener("click", () => void setTheme(button.dataset.themeValue));
   });
@@ -206,28 +234,34 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tab}`);
   });
-  els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", manager: "管理" })[tab] || "bilive";
+  els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", vtuber: "VTuber", manager: "管理" })[tab] || "bilive";
   if (tab === "comments" && !state.chatLoaded) {
     void loadDanmuHistory();
+  }
+  if (tab === "vtuber") {
+    void refreshVtuber();
   }
 }
 
 async function refreshAll() {
   try {
-    const [health, auth, danmu] = await Promise.all([
+    const [health, auth, danmu, vtuber] = await Promise.all([
       api("/api/health"),
       api("/api/auth/status"),
       api("/api/danmu/status"),
+      api("/api/vtuber/status").catch((error) => ({ error: error.message })),
     ]);
     setStatus(els.serviceStatus, `v${health.version}`, health.status === "ok");
     state.authenticated = auth.authenticated;
     state.config = auth.config;
     state.danmuConnected = danmu.connected;
+    state.vtuberRunning = Boolean(vtuber.running);
     const configPath = auth.config_path || "默认配置路径";
     const statePath = auth.state_path || "";
     els.configPath.textContent = configPath;
     els.configPath.title = statePath ? `配置：${configPath}\n状态：${statePath}` : configPath;
     renderConfig();
+    renderVtuberStatus(vtuber);
   } catch (error) {
     toast(error.message, true);
   }
@@ -398,6 +432,58 @@ async function saveNotifications() {
   toast("提醒设置已保存");
 }
 
+async function saveVtuber() {
+  const result = await persistVtuberConfig();
+  renderVtuberStatus(result);
+  toast("VTuber 设置已保存");
+}
+
+async function persistVtuberConfig() {
+  const config = vtuberFormConfig();
+  const result = await api("/api/vtuber/config", { method: "POST", body: { config } });
+  state.config = { ...(state.config || {}), vtuber: config };
+  return result;
+}
+
+async function startVtuber() {
+  await persistVtuberConfig();
+  const result = await api("/api/vtuber/start", { method: "POST" });
+  renderVtuberStatus(result);
+  toast("VTuber 已启动");
+}
+
+async function stopVtuber() {
+  const result = await api("/api/vtuber/stop", { method: "POST" });
+  renderVtuberStatus(result);
+  toast("VTuber 已停止");
+}
+
+async function refreshVtuber() {
+  const result = await api("/api/vtuber/status");
+  renderVtuberStatus(result);
+}
+
+function vtuberFormConfig() {
+  return {
+    enabled: true,
+    runtime_dir: els.vtuberRuntimeDir.value.trim(),
+    python: els.vtuberPython.value.trim() || "python",
+    character: els.vtuberCharacter.value.trim() || "lambda_00",
+    input_mode: els.vtuberInputMode.value,
+    input_address: els.vtuberInputAddress.value.trim(),
+    output_mode: els.vtuberOutputMode.value,
+    model_select: els.vtuberModelSelect.value.trim() || "v3_seperable_half",
+    use_tensorrt: els.vtuberUseTensorrt.checked,
+    frame_rate_limit: clampInteger(els.vtuberFrameRate.value, 1, 240, 30),
+    interpolation: els.vtuberInterpolation.value.trim() || "Off",
+    super_resolution: els.vtuberSuperResolution.value.trim() || "Off",
+    ram_cache_size: els.vtuberRamCache.value.trim() || "2gb",
+    vram_cache_size: els.vtuberVramCache.value.trim() || "2gb",
+    cache_simplify: clampInteger(els.vtuberCacheSimplify.value, 0, 16, 3),
+    extra_args: splitArgs(els.vtuberExtraArgs.value),
+  };
+}
+
 function renderConfig() {
   const config = state.config || {};
   setStatus(els.authStatus, state.authenticated ? (config.username || "已登录") : "未登录", state.authenticated);
@@ -416,6 +502,7 @@ function renderConfig() {
   renderNotificationSettings(config.danmu_notifications || {});
   renderCategoryOptions();
   renderStreamList();
+  renderVtuberConfig(config.vtuber || {});
 }
 
 function renderNotificationSettings(settings) {
@@ -424,6 +511,63 @@ function renderNotificationSettings(settings) {
   els.notifySuperChat.checked = settings.super_chat !== false;
   els.notifyCooldown.value = String(clampInteger(settings.cooldown_secs, 0, 3600, 2));
   els.notifyExpireTimeout.value = String(clampInteger(settings.expire_timeout_ms, 0, 3600000, 0));
+}
+
+function renderVtuberConfig(config) {
+  els.vtuberRuntimeDir.value = config.runtime_dir || "";
+  els.vtuberPython.value = config.python || "python";
+  els.vtuberCharacter.value = config.character || "lambda_00";
+  els.vtuberInputMode.value = config.input_mode || "mouse";
+  els.vtuberInputAddress.value = config.input_address || "";
+  els.vtuberOutputMode.value = config.output_mode || "debug";
+  els.vtuberModelSelect.value = config.model_select || "v3_seperable_half";
+  els.vtuberFrameRate.value = String(clampInteger(config.frame_rate_limit, 1, 240, 30));
+  els.vtuberUseTensorrt.checked = Boolean(config.use_tensorrt);
+  els.vtuberInterpolation.value = config.interpolation || "Off";
+  els.vtuberSuperResolution.value = config.super_resolution || "Off";
+  els.vtuberCacheSimplify.value = String(clampInteger(config.cache_simplify, 0, 16, 3));
+  els.vtuberRamCache.value = config.ram_cache_size || "2gb";
+  els.vtuberVramCache.value = config.vram_cache_size || "2gb";
+  els.vtuberExtraArgs.value = Array.isArray(config.extra_args) ? config.extra_args.join(" ") : "";
+}
+
+function renderVtuberStatus(status) {
+  if (status?.error) {
+    setStatus(els.vtuberStatus, "不可用", false);
+    els.vtuberRuntimeStatus.textContent = "不可用";
+    els.vtuberRuntimeStatus.className = "status-badge";
+    els.vtuberOutput.textContent = status.error;
+    return;
+  }
+
+  const running = Boolean(status?.running);
+  const configured = Boolean(status?.configured);
+  state.vtuberRunning = running;
+  setStatus(els.vtuberStatus, running ? "运行中" : "未启动", running);
+  els.vtuberRuntimeStatus.textContent = running ? `运行中${status.pid ? ` · PID ${status.pid}` : ""}` : configured ? "已配置" : "未配置";
+  els.vtuberRuntimeStatus.className = `status-badge ${running ? "ok" : configured ? "ready" : ""}`;
+  els.stopVtuber.disabled = !running;
+  els.startVtuber.disabled = running;
+  els.vtuberOutput.textContent = JSON.stringify({
+    configured,
+    running,
+    pid: status?.pid || null,
+    command: status?.command || [],
+  }, null, 2);
+  renderVtuberRecommendation(status?.recommendation);
+}
+
+function renderVtuberRecommendation(recommendation) {
+  if (!recommendation) {
+    els.vtuberArchitectureNote.textContent = "暂无判断";
+    return;
+  }
+  const items = Array.isArray(recommendation.rationale) ? recommendation.rationale : [];
+  els.vtuberArchitectureNote.innerHTML = `
+    <div><strong>Rust 重写：</strong>${escapeHtml(recommendation.rust_rewrite || "")}</div>
+    <div><strong>并入 bilive：</strong>${escapeHtml(recommendation.merge_into_bilive || "")}</div>
+    ${items.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+  `;
 }
 
 async function setTheme(theme) {
@@ -1150,6 +1294,13 @@ function tryParseJson(value) {
 
 function selectValue(value) {
   return value == null ? "" : String(value);
+}
+
+function splitArgs(value) {
+  return String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
 function escapeHtml(value) {

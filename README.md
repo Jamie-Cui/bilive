@@ -7,8 +7,10 @@ browser admin UI from `web/`.
 The project has three main pieces:
 
 - A Rust CLI and service backend.
+- A terminal danmu viewer that connects to the local service.
 - An embedded, plain HTML/CSS/JavaScript admin UI with no frontend build step.
-- Linux systemd and RPM packaging kept separate from the service implementation.
+- A Linux systemd service template kept separate from the service
+  implementation.
 
 ## Features
 
@@ -29,9 +31,9 @@ crates/
   bilive-cli/       # bilive start/stop/status/restart and foreground serve
   bilive-core/      # Bilibili API client, signing, state, danmu, events
   bilive-server/    # axum HTTP/WebSocket routes and static file serving
+  bilive-danmu/     # terminal danmu viewer for a running bilive service
 web/                # No-build static admin UI
-packaging/          # systemd and RPM service units
-xtask/              # packaging helpers, including cargo build-rpm
+packaging/          # systemd service unit template
 ```
 
 ## Quick Start
@@ -76,9 +78,23 @@ or `--log-file` values to `status`, `restart`, and `stop`. If you use a
 non-default listen address, pass the same `--listen` value to `status` for the
 health check.
 
+## TUI Usage
+
+Run the service first, then open the terminal danmu viewer:
+
+```bash
+cargo run -p bilive-danmu -- --url http://127.0.0.1:22333
+```
+
+The TUI subscribes to `/api/events`, refreshes recent danmu through
+`/api/danmu/messages`, and requests `/api/danmu/connect` on startup unless
+`--no-connect` is passed. Use `r` to refresh history, `k`/`j` or arrow keys to
+scroll, `u`/`d` to page, `g`/`G` for top/bottom, and `q` to quit.
+
 ## Configuration
 
-The application config is stored as JSON. By default, the config file lives at:
+The user-editable application config is stored as TOML. By default, the config
+file lives at:
 
 ```text
 ~/.config/bilive/config
@@ -90,9 +106,24 @@ When `XDG_CONFIG_HOME` is set, the default config path is:
 $XDG_CONFIG_HOME/bilive/config
 ```
 
-For compatibility, if the new default config path does not exist, bilive will
-read the previous default `config.json` from the state directory once and write
-future saves to the new config path.
+Cookies, CSRF tokens, WBI keys, room tokens, area metadata, and stream
+credentials are runtime state, not user config. They are stored separately under
+the platform cache directory. On Linux this is usually:
+
+```text
+~/.cache/bilive/state.json
+```
+
+When `XDG_CACHE_HOME` is set, the default cache state path is:
+
+```text
+$XDG_CACHE_HOME/bilive/state.json
+```
+
+For compatibility, bilive still reads the previous JSON config shape from the
+selected config path, or the old default `config.json` from the state directory
+when no explicit config path is provided, then rewrites future saves as TOML
+config plus cache state.
 
 Background runtime state is separate. `start` writes `bilive.pid` and
 `bilive.log` under the platform state directory. On Linux this is usually:
@@ -103,7 +134,9 @@ Background runtime state is separate. `start` writes `bilive.pid` and
 
 Useful overrides:
 
-- `--config` or `BILIVE_CONFIG`: config JSON file path.
+- `--config` or `BILIVE_CONFIG`: config TOML file path.
+- `--cache-dir` or `BILIVE_CACHE_DIR`: cache directory for login and live
+  runtime state.
 - `--listen` or `BILIVE_LISTEN`: service bind address.
 - `--web-dir` or `BILIVE_WEB_DIR`: override the embedded UI with a static UI
   directory.
@@ -138,12 +171,6 @@ node --check web/app.js
 The workspace uses Rust 2024 and the Rust version declared in `Cargo.toml`.
 The frontend has no npm, Vite, or bundler dependency.
 
-For RPM packaging, the repository defines a Cargo alias:
-
-```bash
-cargo build-rpm
-```
-
 ## Service Install
 
 Build the release binary:
@@ -168,31 +195,6 @@ sudo systemctl enable --now bilive.service
 
 The packaged service listens on `127.0.0.1:22333`, stores state in
 `/var/lib/bilive`, and sets conservative systemd sandboxing options.
-
-## RPM Package
-
-Install the RPM packaging helper once:
-
-```bash
-cargo install cargo-generate-rpm
-```
-
-Then build the release binary and generate the RPM from the workspace root:
-
-```bash
-cargo build-rpm
-```
-
-The RPM is written under `target/generate-rpm/`. It installs `bilive` to
-`/usr/bin/bilive`, installs the systemd unit to
-`/usr/lib/systemd/system/bilive.service`, and uses the embedded web UI.
-
-Install and start it with:
-
-```bash
-sudo dnf install ./target/generate-rpm/bilive-*.rpm
-sudo systemctl enable --now bilive.service
-```
 
 ## Security Notes
 

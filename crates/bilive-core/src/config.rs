@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env,
     ffi::OsString,
@@ -11,6 +13,10 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
+
+const CONFIG_FILE_NAME: &str = "config";
+const STATE_FILE_NAME: &str = "state.json";
+const LEGACY_STATE_CONFIG_FILE_NAME: &str = "config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppCookie {
@@ -144,30 +150,187 @@ impl AppConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct UserConfig {
+    theme: String,
+    room_title: String,
+    category_id: String,
+    area_id: String,
+    danmu_notifications: DanmuNotificationConfig,
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        Self {
+            theme: "light".to_string(),
+            room_title: String::new(),
+            category_id: String::new(),
+            area_id: String::new(),
+            danmu_notifications: DanmuNotificationConfig::default(),
+        }
+    }
+}
+
+impl From<&AppConfig> for UserConfig {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            theme: config.theme.clone(),
+            room_title: config.room_title.clone(),
+            category_id: config.category_id.clone(),
+            area_id: config.area_id.clone(),
+            danmu_notifications: config.danmu_notifications.clone(),
+        }
+    }
+}
+
+impl UserConfig {
+    fn apply_to(self, config: &mut AppConfig) {
+        config.theme = self.theme;
+        config.room_title = self.room_title;
+        config.category_id = self.category_id;
+        config.area_id = self.area_id;
+        config.danmu_notifications = self.danmu_notifications;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct CachedState {
+    cookies: Vec<AppCookie>,
+    area_list: Value,
+    uid: u64,
+    avatar: Option<String>,
+    username: Option<String>,
+    room_id: u64,
+    csrf: Option<String>,
+    img_url: String,
+    sub_url: String,
+    room_token: String,
+    is_open_live: bool,
+    streams: Vec<StreamCredential>,
+}
+
+impl Default for CachedState {
+    fn default() -> Self {
+        Self {
+            cookies: Vec::new(),
+            area_list: Value::Array(Vec::new()),
+            uid: 0,
+            avatar: None,
+            username: None,
+            room_id: 0,
+            csrf: None,
+            img_url: String::new(),
+            sub_url: String::new(),
+            room_token: String::new(),
+            is_open_live: false,
+            streams: Vec::new(),
+        }
+    }
+}
+
+impl From<&AppConfig> for CachedState {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            cookies: config.cookies.clone(),
+            area_list: config.area_list.clone(),
+            uid: config.uid,
+            avatar: config.avatar.clone(),
+            username: config.username.clone(),
+            room_id: config.room_id,
+            csrf: config.csrf.clone(),
+            img_url: config.img_url.clone(),
+            sub_url: config.sub_url.clone(),
+            room_token: config.room_token.clone(),
+            is_open_live: config.is_open_live,
+            streams: config.streams.clone(),
+        }
+    }
+}
+
+impl CachedState {
+    fn apply_to(self, config: &mut AppConfig) {
+        config.cookies = self.cookies;
+        config.area_list = self.area_list;
+        config.uid = self.uid;
+        config.avatar = self.avatar;
+        config.username = self.username;
+        config.room_id = self.room_id;
+        config.csrf = self.csrf;
+        config.img_url = self.img_url;
+        config.sub_url = self.sub_url;
+        config.room_token = self.room_token;
+        config.is_open_live = self.is_open_live;
+        config.streams = self.streams;
+
+        if config.csrf.is_none() {
+            config.csrf = config.cookie("bili_jct").map(ToOwned::to_owned);
+        }
+    }
+}
+
+enum ConfigFile {
+    User(UserConfig),
+    LegacyFull(AppConfig),
+}
+
 #[derive(Clone)]
 pub struct ConfigStore {
     path: Arc<PathBuf>,
+    state_path: Arc<PathBuf>,
     inner: Arc<Mutex<AppConfig>>,
 }
 
 impl ConfigStore {
     pub async fn load(path: Option<PathBuf>) -> std::io::Result<Self> {
+        Self::load_with_cache_dir(path, None).await
+    }
+
+    pub async fn load_with_cache_dir(
+        path: Option<PathBuf>,
+        cache_dir: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
         let explicit_path = path.is_some();
         let path = Arc::new(path.unwrap_or_else(default_config_path));
-        let config = match read_config_if_exists(path.as_ref()).await? {
-            Some(config) => config,
-            None if explicit_path => AppConfig::default(),
-            None => read_legacy_default_config().await?.unwrap_or_default(),
+        let state_path = Arc::new(
+            cache_dir
+                .map(|dir| dir.join(STATE_FILE_NAME))
+                .unwrap_or_else(default_cache_state_path),
+        );
+        let state = read_state_if_exists(state_path.as_ref())
+            .await?
+            .unwrap_or_default();
+
+        let (config, should_migrate) = match read_config_if_exists(path.as_ref()).await? {
+            Some(ConfigFile::User(config)) => (config_with_state(config, state), false),
+            Some(ConfigFile::LegacyFull(config)) => (config, true),
+            None if explicit_path => (config_with_state(UserConfig::default(), state), false),
+            None => match read_legacy_default_config().await? {
+                Some(config) => (config, true),
+                None => (config_with_state(UserConfig::default(), state), false),
+            },
         };
 
-        Ok(Self {
+        let store = Self {
             path,
+            state_path,
             inner: Arc::new(Mutex::new(config)),
-        })
+        };
+
+        if should_migrate {
+            store.save().await?;
+        }
+
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {
         self.path.as_ref()
+    }
+
+    pub fn state_path(&self) -> &Path {
+        self.state_path.as_ref()
     }
 
     pub async fn get(&self) -> AppConfig {
@@ -196,13 +359,48 @@ impl ConfigStore {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        if let Some(parent) = self.state_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
-        let content = serde_json::to_vec_pretty(config).map_err(std::io::Error::other)?;
-        tokio::fs::write(self.path.as_ref(), content).await
+        let user_config = UserConfig::from(config);
+        let config_content = toml::to_string_pretty(&user_config).map_err(std::io::Error::other)?;
+        tokio::fs::write(self.path.as_ref(), config_content).await?;
+
+        let state = CachedState::from(config);
+        let state_content = serde_json::to_vec_pretty(&state).map_err(std::io::Error::other)?;
+        write_private(self.state_path.as_ref(), state_content).await
     }
 }
 
-async fn read_config_if_exists(path: &Path) -> std::io::Result<Option<AppConfig>> {
+fn config_with_state(user_config: UserConfig, state: CachedState) -> AppConfig {
+    let mut config = AppConfig::default();
+    user_config.apply_to(&mut config);
+    state.apply_to(&mut config);
+    config
+}
+
+async fn read_config_if_exists(path: &Path) -> std::io::Result<Option<ConfigFile>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = tokio::fs::read_to_string(path).await?;
+    if let Ok(config) = toml::from_str::<UserConfig>(&content) {
+        return Ok(Some(ConfigFile::User(config)));
+    }
+    if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+        return Ok(Some(ConfigFile::LegacyFull(config)));
+    }
+
+    Ok(Some(ConfigFile::User(UserConfig::default())))
+}
+
+async fn read_legacy_default_config() -> std::io::Result<Option<AppConfig>> {
+    read_legacy_json_config_if_exists(&legacy_default_config_path()).await
+}
+
+async fn read_legacy_json_config_if_exists(path: &Path) -> std::io::Result<Option<AppConfig>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -211,8 +409,24 @@ async fn read_config_if_exists(path: &Path) -> std::io::Result<Option<AppConfig>
     Ok(Some(serde_json::from_str(&content).unwrap_or_default()))
 }
 
-async fn read_legacy_default_config() -> std::io::Result<Option<AppConfig>> {
-    read_config_if_exists(&legacy_default_config_path()).await
+async fn read_state_if_exists(path: &Path) -> std::io::Result<Option<CachedState>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(Some(serde_json::from_str(&content).unwrap_or_default()))
+}
+
+#[cfg(unix)]
+async fn write_private(path: &Path, content: Vec<u8>) -> std::io::Result<()> {
+    tokio::fs::write(path, content).await?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+}
+
+#[cfg(not(unix))]
+async fn write_private(path: &Path, content: Vec<u8>) -> std::io::Result<()> {
+    tokio::fs::write(path, content).await
 }
 
 pub fn default_state_dir() -> PathBuf {
@@ -255,11 +469,54 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 pub fn default_config_path() -> PathBuf {
-    default_config_dir().join("config")
+    default_config_dir().join(CONFIG_FILE_NAME)
 }
 
 fn legacy_default_config_path() -> PathBuf {
-    default_state_dir().join("config.json")
+    default_state_dir().join(LEGACY_STATE_CONFIG_FILE_NAME)
+}
+
+pub fn default_cache_dir() -> PathBuf {
+    if let Some(path) = non_empty_os_string(env::var_os("BILIVE_CACHE_DIR")) {
+        return PathBuf::from(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(path) = non_empty_os_string(env::var_os("LOCALAPPDATA")) {
+            return PathBuf::from(path).join("bilive");
+        }
+
+        if let Some(home) = non_empty_os_string(env::var_os("USERPROFILE")) {
+            return PathBuf::from(home)
+                .join("AppData")
+                .join("Local")
+                .join("bilive");
+        }
+
+        PathBuf::from(".").join("bilive")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = non_empty_os_string(env::var_os("HOME")) {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("bilive");
+        }
+
+        PathBuf::from(".").join(".cache").join("bilive")
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        default_cache_dir_from_env(env::var_os("XDG_CACHE_HOME"), env::var_os("HOME"))
+    }
+}
+
+pub fn default_cache_state_path() -> PathBuf {
+    default_cache_dir().join(STATE_FILE_NAME)
 }
 
 pub fn default_config_dir() -> PathBuf {
@@ -305,6 +562,19 @@ fn default_config_dir_from_env(
     PathBuf::from(".").join(".config").join("bilive")
 }
 
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn default_cache_dir_from_env(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    if let Some(path) = non_empty_os_string(xdg_cache_home) {
+        return PathBuf::from(path).join("bilive");
+    }
+
+    if let Some(home) = non_empty_os_string(home) {
+        return PathBuf::from(home).join(".cache").join("bilive");
+    }
+
+    PathBuf::from(".").join(".cache").join("bilive")
+}
+
 pub fn parse_cookie_header(cookie_header: &str) -> Vec<AppCookie> {
     cookie_header
         .split(';')
@@ -337,7 +607,11 @@ mod tests {
                 "bilive-config-{name}-{}-{nanos}",
                 std::process::id()
             ))
-            .join("config.json")
+            .join("config")
+    }
+
+    fn cache_dir_for_config(path: &Path) -> PathBuf {
+        path.parent().unwrap().join("cache")
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -355,6 +629,23 @@ mod tests {
         let path = default_config_dir_from_env(None, Some("/home/alice".into())).join("config");
 
         assert_eq!(path, PathBuf::from("/home/alice/.config/bilive/config"));
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[test]
+    fn default_cache_path_uses_xdg_cache_home() {
+        let path =
+            default_cache_dir_from_env(Some("/tmp/bilive-cache".into()), None).join("state.json");
+
+        assert_eq!(path, PathBuf::from("/tmp/bilive-cache/bilive/state.json"));
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[test]
+    fn default_cache_path_falls_back_to_home_cache() {
+        let path = default_cache_dir_from_env(None, Some("/home/alice".into())).join("state.json");
+
+        assert_eq!(path, PathBuf::from("/home/alice/.cache/bilive/state.json"));
     }
 
     #[test]
@@ -500,11 +791,17 @@ mod tests {
     async fn config_store_loads_default_and_persists_updates() {
         let path = unique_config_path("persist");
         let parent = path.parent().unwrap().to_path_buf();
+        let cache_dir = cache_dir_for_config(&path);
+        let state_path = cache_dir.join("state.json");
 
-        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let store = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir.clone()))
+            .await
+            .unwrap();
         assert_eq!(store.path(), path.as_path());
+        assert_eq!(store.state_path(), state_path.as_path());
         assert_eq!(store.get().await.theme, "light");
         assert!(!path.exists());
+        assert!(!state_path.exists());
 
         let updated = store
             .update(|config| {
@@ -522,8 +819,21 @@ mod tests {
         assert_eq!(updated.room_id, 12345);
         assert_eq!(updated.csrf.as_deref(), Some("csrf"));
         assert!(path.exists());
+        assert!(state_path.exists());
 
-        let reloaded = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let config_content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(config_content.contains("theme = \"dark\""));
+        assert!(!config_content.contains("cookies"));
+        assert!(!config_content.contains("csrf"));
+        assert!(!config_content.contains("room_id"));
+
+        let state_content = tokio::fs::read_to_string(&state_path).await.unwrap();
+        assert!(state_content.contains("bili_jct"));
+        assert!(state_content.contains("12345"));
+
+        let reloaded = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir))
+            .await
+            .unwrap();
         let saved = reloaded.get().await;
         assert_eq!(saved.theme, "dark");
         assert_eq!(saved.room_id, 12345);
@@ -536,12 +846,131 @@ mod tests {
     async fn config_store_falls_back_to_default_for_invalid_json() {
         let path = unique_config_path("invalid");
         let parent = path.parent().unwrap().to_path_buf();
+        let cache_dir = cache_dir_for_config(&path);
         tokio::fs::create_dir_all(&parent).await.unwrap();
         tokio::fs::write(&path, b"{not json").await.unwrap();
 
-        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let store = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir))
+            .await
+            .unwrap();
 
         assert_eq!(store.get().await.theme, "light");
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn config_store_loads_toml_config_and_cached_state() {
+        let path = unique_config_path("toml-state");
+        let parent = path.parent().unwrap().to_path_buf();
+        let cache_dir = cache_dir_for_config(&path);
+        let state_path = cache_dir.join("state.json");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+        tokio::fs::write(
+            &path,
+            r#"
+theme = "dark"
+room_title = "Live room"
+category_id = "1"
+area_id = "2"
+
+[danmu_notifications]
+enabled = true
+danmu = false
+super_chat = true
+cooldown_secs = 8
+expire_timeout_ms = 1000
+"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &state_path,
+            r#"{
+  "cookies": [{ "name": "bili_jct", "value": "csrf" }],
+  "uid": 42,
+  "room_id": 12345,
+  "csrf": "csrf",
+  "streams": [{ "type": "rtmp-1", "address": "rtmp://example/live", "key": "secret" }]
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let store = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir))
+            .await
+            .unwrap();
+        let config = store.get().await;
+
+        assert_eq!(config.theme, "dark");
+        assert_eq!(config.room_title, "Live room");
+        assert_eq!(config.category_id, "1");
+        assert_eq!(config.area_id, "2");
+        assert!(config.danmu_notifications.enabled);
+        assert!(!config.danmu_notifications.danmu);
+        assert_eq!(config.danmu_notifications.cooldown_secs, 8);
+        assert_eq!(config.uid, 42);
+        assert_eq!(config.room_id, 12345);
+        assert_eq!(config.cookie("bili_jct"), Some("csrf"));
+        assert_eq!(config.streams[0].key, "secret");
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn config_store_migrates_legacy_json_into_toml_and_cache_state() {
+        let path = unique_config_path("legacy");
+        let parent = path.parent().unwrap().to_path_buf();
+        let cache_dir = cache_dir_for_config(&path);
+        let state_path = cache_dir.join("state.json");
+        let legacy = AppConfig {
+            theme: "dark".to_string(),
+            room_title: "Legacy room".to_string(),
+            category_id: "11".to_string(),
+            area_id: "22".to_string(),
+            cookies: vec![AppCookie {
+                name: "bili_jct".to_string(),
+                value: "csrf".to_string(),
+            }],
+            csrf: Some("csrf".to_string()),
+            uid: 99,
+            room_id: 100,
+            streams: vec![StreamCredential {
+                kind: "rtmp-1".to_string(),
+                address: "rtmp://example/live".to_string(),
+                key: "secret-key".to_string(),
+            }],
+            ..Default::default()
+        };
+        tokio::fs::create_dir_all(&parent).await.unwrap();
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let store = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir.clone()))
+            .await
+            .unwrap();
+        let config = store.get().await;
+        assert_eq!(config.theme, "dark");
+        assert_eq!(config.cookie("bili_jct"), Some("csrf"));
+        assert_eq!(config.streams[0].key, "secret-key");
+
+        let config_content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(config_content.contains("theme = \"dark\""));
+        assert!(!config_content.contains("secret-key"));
+        assert!(!config_content.contains("bili_jct"));
+
+        let state_content = tokio::fs::read_to_string(&state_path).await.unwrap();
+        assert!(state_content.contains("secret-key"));
+        assert!(state_content.contains("bili_jct"));
+
+        let reloaded = ConfigStore::load_with_cache_dir(Some(path.clone()), Some(cache_dir))
+            .await
+            .unwrap();
+        let reloaded = reloaded.get().await;
+        assert_eq!(reloaded.room_title, "Legacy room");
+        assert_eq!(reloaded.uid, 99);
+        assert_eq!(reloaded.cookie("bili_jct"), Some("csrf"));
+
         let _ = tokio::fs::remove_dir_all(parent).await;
     }
 
@@ -549,8 +978,11 @@ mod tests {
     async fn explicit_config_path_ignores_legacy_default_config() {
         let path = unique_config_path("explicit");
         let parent = path.parent().unwrap().to_path_buf();
+        let cache_dir = cache_dir_for_config(&path);
 
-        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let store = ConfigStore::load_with_cache_dir(Some(path), Some(cache_dir))
+            .await
+            .unwrap();
         let config = store.get().await;
 
         assert_eq!(config.theme, AppConfig::default().theme);

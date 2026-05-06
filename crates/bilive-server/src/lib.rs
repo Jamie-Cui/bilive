@@ -45,6 +45,7 @@ pub struct ServerConfig {
     pub listen: SocketAddr,
     pub web_dir: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -183,9 +184,10 @@ fn default_room_silent_level() -> u64 {
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let web_dir = config.web_dir.map(resolve_web_dir).transpose()?;
-    let store = ConfigStore::load(config.config_path.clone())
-        .await
-        .context("failed to load config")?;
+    let store =
+        ConfigStore::load_with_cache_dir(config.config_path.clone(), config.cache_dir.clone())
+            .await
+            .context("failed to load config")?;
     let bili = BiliClient::new(store.clone()).context("failed to create bilibili client")?;
     let (events, _) = broadcast::channel(1024);
     let danmu_log = Arc::new(Mutex::new(DanmuHistory::default()));
@@ -833,6 +835,7 @@ async fn auth_status(State(state): State<AppState>) -> Json<Value> {
         "authenticated": status.authenticated,
         "config": public_config(status.config),
         "config_path": status.config_path,
+        "state_path": status.state_path,
     }))
 }
 

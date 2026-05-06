@@ -16,10 +16,10 @@ cargo test --workspace                  # run Rust tests
 node --check web/app.js                 # validate frontend JavaScript syntax
 cargo run -p bilive -- serve --listen 127.0.0.1:22333 --web-dir web
 cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web
+cargo run -p bilive-danmu -- --url http://127.0.0.1:22333
 cargo run -p bilive -- status
 cargo run -p bilive -- stop
 cargo build --release -p bilive
-cargo build-rpm                         # alias for xtask RPM packaging
 ```
 
 `serve` runs the HTTP service in the foreground and is hidden from top-level
@@ -58,8 +58,8 @@ Rust 2024 edition workspace with resolver v3 and MSRV from `Cargo.toml`.
 - **bilive-cli** — Clap entry point for `start`/`stop`/`status`/`restart` and hidden foreground `serve`; derives runtime pid/log paths and launches the server.
 - **bilive-core** — Bilibili HTTP client, WBI/app signing, config persistence, stream credential parsing, danmu TCP protocol/client, and shared event types.
 - **bilive-server** — Axum HTTP/WebSocket server; exposes API routes, renders QR SVGs, serves embedded or filesystem static UI assets, broadcasts events, stores recent danmu history, and runs stream tests.
+- **bilive-danmu** — Terminal danmu viewer for a running local server; reads public config, `/api/events`, and `/api/danmu/messages`.
 - **web** — Vanilla HTML/CSS/JavaScript admin UI; no npm, Vite, bundler, or generated frontend artifacts.
-- **xtask** — Packaging helper behind `cargo build-rpm`.
 
 ## Backend Notes
 
@@ -103,7 +103,6 @@ changes to `web/` without `--web-dir`.
 | `crates/bilive-core/src/danmu/protocol.rs` | Binary danmu protocol codec |
 | `crates/bilive-core/src/event.rs` | Shared event enum |
 | `crates/bilive-server/src/lib.rs` | HTTP routes, WebSocket handler, static UI, notifications, stream test |
+| `crates/bilive-danmu/src/main.rs` | Terminal danmu viewer |
 | `web/app.js` | Frontend state, API calls, rendering, event handling |
 | `packaging/systemd/bilive.service` | Manual systemd unit template |
-| `packaging/rpm/bilive.service` | RPM-installed systemd unit |
-| `xtask/src/main.rs` | `cargo build-rpm` implementation |

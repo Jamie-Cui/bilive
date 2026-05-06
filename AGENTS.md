@@ -15,12 +15,13 @@ This repository is a Rust workspace with an embedded, no-build static web UI.
 - `crates/bilive-server/`: axum HTTP/WebSocket service, API routes, QR SVG
   rendering, embedded/static file serving, danmu history, notifications, and
   stream testing.
+- `crates/bilive-danmu/`: terminal UI that connects to the local server event
+  WebSocket and danmu history APIs.
 - `crates/bilive-core/`: Bilibili HTTP client, WBI/app signing, config storage,
   stream credential parsing, danmu client/protocol, and shared event types.
 - `web/`: plain `index.html`, `styles.css`, `app.js`, and `favicon.svg`; no
   npm, Vite, bundler, or generated frontend artifacts.
-- `packaging/systemd/` and `packaging/rpm/`: Linux service unit templates.
-- `xtask/`: helper commands, currently `cargo build-rpm`.
+- `packaging/systemd/`: Linux service unit template.
 - `Cargo.toml` and `Cargo.lock`: workspace manifest and locked Rust dependencies.
 
 Keep tests near the Rust module they cover with inline `#[cfg(test)]` modules
@@ -37,13 +38,12 @@ or crate-local `tests/`.
   the local service and serve UI files from the working tree.
 - `cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web`: start
   the local service in the background.
+- `cargo run -p bilive-danmu -- --url http://127.0.0.1:22333`: view live danmu in
+  a terminal after the local service is running.
 - `cargo run -p bilive -- status` / `cargo run -p bilive -- stop`: inspect or
   stop the background service.
 - `cargo build --release -p bilive`: build the release binary with embedded UI
   assets.
-- `cargo build-rpm`: build the release binary and generate an RPM through
-  `xtask`; requires `cargo-generate-rpm`.
-
 The frontend is embedded into the Rust binary by default. During UI work, pass
 `--web-dir web`, edit files directly, and refresh the browser. Rebuild the Rust
 binary before relying on embedded UI assets. `serve` is hidden from top-level

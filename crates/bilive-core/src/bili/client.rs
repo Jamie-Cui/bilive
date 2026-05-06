@@ -58,6 +58,7 @@ pub struct LoginStatus {
     pub authenticated: bool,
     pub config: AppConfig,
     pub config_path: String,
+    pub state_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +129,7 @@ impl BiliClient {
                 && config.cookie("bili_jct").is_some(),
             config,
             config_path: self.config.path().display().to_string(),
+            state_path: self.config.state_path().display().to_string(),
         }
     }
 
@@ -1042,7 +1044,16 @@ mod tests {
                 "bilive-client-{name}-{}-{nanos}",
                 std::process::id()
             ))
-            .join("config.json")
+            .join("config")
+    }
+
+    async fn config_store_for(path: &std::path::Path) -> ConfigStore {
+        ConfigStore::load_with_cache_dir(
+            Some(path.to_path_buf()),
+            Some(path.parent().unwrap().join("cache")),
+        )
+        .await
+        .unwrap()
     }
 
     #[test]
@@ -1199,7 +1210,7 @@ mod tests {
     async fn login_status_requires_sessdata_and_csrf() {
         let path = unique_config_path("login-status");
         let parent = path.parent().unwrap().to_path_buf();
-        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let store = config_store_for(&path).await;
         let client = BiliClient::new(store.clone()).unwrap();
 
         assert!(!client.login_status().await.authenticated);
@@ -1235,7 +1246,7 @@ mod tests {
     async fn patch_config_updates_only_supported_string_fields() {
         let path = unique_config_path("patch");
         let parent = path.parent().unwrap().to_path_buf();
-        let store = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let store = config_store_for(&path).await;
         store
             .update(|config| {
                 config.uid = 42;
@@ -1277,7 +1288,7 @@ mod tests {
         assert_eq!(updated.uid, 42);
         assert_eq!(updated.room_id, 100);
 
-        let reloaded = ConfigStore::load(Some(path.clone())).await.unwrap();
+        let reloaded = config_store_for(&path).await;
         let reloaded = reloaded.get().await;
         assert_eq!(reloaded.theme, "dark");
         assert_eq!(reloaded.danmu_notifications.cooldown_secs, 7);
@@ -1290,7 +1301,7 @@ mod tests {
     async fn set_cookie_login_rejects_missing_required_cookies_without_saving() {
         let path = unique_config_path("cookie-login");
         let parent = path.parent().unwrap().to_path_buf();
-        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let store = config_store_for(&path).await;
         let client = BiliClient::new(store.clone()).unwrap();
 
         let error = client.set_cookie_login("SESSDATA=abc").await.unwrap_err();
@@ -1305,7 +1316,7 @@ mod tests {
     async fn capture_cookies_updates_store_and_csrf() {
         let path = unique_config_path("capture");
         let parent = path.parent().unwrap().to_path_buf();
-        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let store = config_store_for(&path).await;
         let client = BiliClient::new(store.clone()).unwrap();
         let mut headers = HeaderMap::new();
         headers.append(

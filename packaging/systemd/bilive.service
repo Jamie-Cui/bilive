@@ -18,6 +18,7 @@ CacheDirectory=bilive
 Environment=RUST_LOG=bilive=info,bilive_server=info,bilive_core=info,tower_http=info
 Environment=BILIVE_STATE_DIR=/var/lib/bilive
 Environment=BILIVE_CONFIG=/var/lib/bilive/config
+Environment=BILIVE_CACHE_DIR=/var/cache/bilive
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

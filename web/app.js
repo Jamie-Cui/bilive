@@ -223,7 +223,10 @@ async function refreshAll() {
     state.authenticated = auth.authenticated;
     state.config = auth.config;
     state.danmuConnected = danmu.connected;
-    els.configPath.textContent = auth.config_path || "默认配置路径";
+    const configPath = auth.config_path || "默认配置路径";
+    const statePath = auth.state_path || "";
+    els.configPath.textContent = configPath;
+    els.configPath.title = statePath ? `配置：${configPath}\n状态：${statePath}` : configPath;
     renderConfig();
   } catch (error) {
     toast(error.message, true);

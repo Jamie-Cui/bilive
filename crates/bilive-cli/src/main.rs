@@ -66,6 +66,9 @@ struct ServiceArgs {
 
     #[arg(long, env = "BILIVE_CONFIG")]
     config: Option<PathBuf>,
+
+    #[arg(long, env = "BILIVE_CACHE_DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -134,6 +137,7 @@ async fn serve(args: ServiceArgs) -> anyhow::Result<()> {
         listen: args.listen,
         web_dir,
         config_path: args.config,
+        cache_dir: args.cache_dir,
     })
     .await
 }
@@ -193,6 +197,10 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
 
     if let Some(config) = &args.service.config {
         command.arg("--config").arg(config);
+    }
+
+    if let Some(cache_dir) = &args.service.cache_dir {
+        command.arg("--cache-dir").arg(cache_dir);
     }
 
     unsafe {

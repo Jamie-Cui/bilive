@@ -27,7 +27,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -91,10 +91,11 @@ struct DanmuHistoryEntry {
     id: String,
     payload: String,
     received_at: u64,
+    received_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sent_at: Option<u64>,
     timeline: Option<String>,
     source: &'static str,
-    #[serde(skip_serializing)]
-    sort_at: u64,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +103,7 @@ struct DanmuHistory {
     room_id: Option<u64>,
     items: Vec<DanmuHistoryEntry>,
     seen: HashSet<String>,
+    next_received_seq: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +190,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(1024);
     let danmu_log = Arc::new(Mutex::new(DanmuHistory::default()));
     spawn_danmu_recorder(events.subscribe(), danmu_log.clone());
+    spawn_danmu_notifier(events.subscribe(), store.clone());
     let state = AppState {
         events,
         danmu_task: Arc::new(Mutex::new(None)),
@@ -354,11 +357,63 @@ fn spawn_danmu_recorder(
     });
 }
 
+fn spawn_danmu_notifier(mut events: broadcast::Receiver<Event>, config: ConfigStore) {
+    tokio::spawn(async move {
+        let mut last_notification = Instant::now() - Duration::from_secs(3600);
+        loop {
+            match events.recv().await {
+                Ok(Event::DanmuRaw { payload }) => {
+                    let Some(notification) = danmu_notification_from_payload(&payload) else {
+                        continue;
+                    };
+                    let settings = config.get().await.danmu_notifications;
+                    if !settings.enabled
+                        || notification.kind == DanmuNotificationKind::Danmu && !settings.danmu
+                        || notification.kind == DanmuNotificationKind::SuperChat
+                            && !settings.super_chat
+                    {
+                        continue;
+                    }
+
+                    if notification.kind == DanmuNotificationKind::Danmu {
+                        let cooldown = Duration::from_secs(settings.cooldown_secs);
+                        if !cooldown.is_zero() && last_notification.elapsed() < cooldown {
+                            continue;
+                        }
+                    }
+
+                    match send_desktop_notification(&notification, settings.expire_timeout_ms).await
+                    {
+                        Ok(status) if status.success() => {
+                            last_notification = Instant::now();
+                        }
+                        Ok(status) => {
+                            warn!("desktop notification command exited with status {status}");
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            warn!("desktop notification command not found: {error}");
+                        }
+                        Err(error) => {
+                            warn!("failed to send desktop notification: {error}");
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    warn!("danmu notifier lagged by {count} events");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 impl DanmuHistory {
     fn reset_for_room(&mut self, room_id: u64) {
         self.room_id = Some(room_id);
         self.items.clear();
         self.seen.clear();
+        self.next_received_seq = 0;
     }
 
     fn ensure_room(&mut self, room_id: u64) {
@@ -367,11 +422,13 @@ impl DanmuHistory {
         }
     }
 
-    fn push(&mut self, entry: DanmuHistoryEntry) -> bool {
+    fn push(&mut self, mut entry: DanmuHistoryEntry) -> bool {
         if !self.seen.insert(entry.id.clone()) {
             return false;
         }
 
+        entry.received_seq = self.next_received_seq;
+        self.next_received_seq = self.next_received_seq.saturating_add(1);
         self.items.push(entry);
         self.sort();
         true
@@ -394,18 +451,11 @@ impl DanmuHistory {
 
     fn sort(&mut self) {
         self.items.sort_by(|left, right| {
-            let left_at = if left.sort_at == 0 {
-                left.received_at
-            } else {
-                left.sort_at
-            };
-            let right_at = if right.sort_at == 0 {
-                right.received_at
-            } else {
-                right.sort_at
-            };
+            let left_at = left.sent_at.unwrap_or(left.received_at);
+            let right_at = right.sent_at.unwrap_or(right.received_at);
             left_at
                 .cmp(&right_at)
+                .then_with(|| left.received_seq.cmp(&right.received_seq))
                 .then_with(|| left.received_at.cmp(&right.received_at))
                 .then_with(|| left.id.cmp(&right.id))
         });
@@ -425,14 +475,15 @@ impl DanmuHistoryEntry {
         }
 
         let id = danmu_entry_id(&parsed).unwrap_or_else(|| format!("raw:{payload}"));
-        let sort_at = danmu_sort_at(&parsed).unwrap_or(received_at);
+        let sent_at = danmu_sent_at(&parsed);
         Some(Self {
             id,
             payload,
             received_at,
+            received_seq: 0,
+            sent_at,
             timeline,
             source,
-            sort_at,
         })
     }
 }
@@ -490,7 +541,13 @@ fn history_entry(item: &Value, received_at: u64) -> Option<DanmuHistoryEntry> {
             [0, 1, 25, color, rnd],
             text,
             [uid, nickname],
-            medal
+            medal,
+            [],
+            [],
+            0,
+            0,
+            null,
+            { "ts": rnd }
         ],
     })
     .to_string();
@@ -501,6 +558,141 @@ fn history_entry(item: &Value, received_at: u64) -> Option<DanmuHistoryEntry> {
 fn is_chat_event(value: &Value) -> bool {
     let cmd = value.get("cmd").and_then(Value::as_str).unwrap_or_default();
     cmd.starts_with("DANMU_MSG") || cmd == "SUPER_CHAT_MESSAGE"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DanmuNotificationKind {
+    Danmu,
+    SuperChat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DanmuNotification {
+    kind: DanmuNotificationKind,
+    title: String,
+    body: String,
+}
+
+fn danmu_notification_from_payload(payload: &str) -> Option<DanmuNotification> {
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let cmd = value.get("cmd").and_then(Value::as_str)?;
+    if cmd.starts_with("DANMU_MSG") {
+        return danmu_message_notification(&value);
+    }
+    if cmd == "SUPER_CHAT_MESSAGE" {
+        return super_chat_notification(&value);
+    }
+    None
+}
+
+fn danmu_message_notification(value: &Value) -> Option<DanmuNotification> {
+    let info = value.get("info").and_then(Value::as_array)?;
+    let text = info.get(1).map(value_to_plain_string).unwrap_or_default();
+    if text.is_empty() {
+        return None;
+    }
+    let user = info.get(2).and_then(Value::as_array);
+    let name = user
+        .and_then(|user| user.get(1))
+        .map(value_to_plain_string)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "用户".to_string());
+
+    Some(DanmuNotification {
+        kind: DanmuNotificationKind::Danmu,
+        title: format!("bilive - {name}"),
+        body: truncate_notification_body(&text),
+    })
+}
+
+fn super_chat_notification(value: &Value) -> Option<DanmuNotification> {
+    let data = value.get("data")?;
+    let message = data
+        .get("message")
+        .map(value_to_plain_string)
+        .unwrap_or_default();
+    if message.is_empty() {
+        return None;
+    }
+    let name = data
+        .get("user_info")
+        .and_then(|value| value.get("uname").or_else(|| value.get("name")))
+        .or_else(|| data.get("uname"))
+        .map(value_to_plain_string)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "用户".to_string());
+    let price = data
+        .get("price")
+        .map(value_to_plain_string)
+        .filter(|price| !price.is_empty());
+    let title = price
+        .map(|price| format!("bilive - 醒目留言 {price}元"))
+        .unwrap_or_else(|| "bilive - 醒目留言".to_string());
+
+    Some(DanmuNotification {
+        kind: DanmuNotificationKind::SuperChat,
+        title,
+        body: truncate_notification_body(&format!("{name}: {message}")),
+    })
+}
+
+fn truncate_notification_body(value: &str) -> String {
+    const LIMIT: usize = 160;
+    let mut body: String = value.chars().take(LIMIT).collect();
+    if value.chars().count() > LIMIT {
+        body.push('…');
+    }
+    body
+}
+
+async fn send_desktop_notification(
+    notification: &DanmuNotification,
+    expire_timeout_ms: u64,
+) -> std::io::Result<ExitStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("notify-send");
+        command.arg("--app-name=bilive");
+        if expire_timeout_ms > 0 {
+            command.arg(format!("--expire-time={expire_timeout_ms}"));
+        }
+        return command
+            .arg(&notification.title)
+            .arg(&notification.body)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = expire_timeout_ms;
+        return Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display notification {} with title {}",
+                applescript_string(&notification.body),
+                applescript_string(&notification.title)
+            ))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = notification;
+        let _ = expire_timeout_ms;
+        Command::new("false").status().await
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn danmu_entry_id(value: &Value) -> Option<String> {
@@ -551,15 +743,19 @@ fn danmu_entry_id(value: &Value) -> Option<String> {
     None
 }
 
-fn danmu_sort_at(value: &Value) -> Option<u64> {
+fn danmu_sent_at(value: &Value) -> Option<u64> {
     let cmd = value.get("cmd").and_then(Value::as_str)?;
     if cmd.starts_with("DANMU_MSG") {
         return value
             .get("info")
             .and_then(Value::as_array)
-            .and_then(|info| info.first())
-            .and_then(Value::as_array)
-            .and_then(|meta| meta.get(4).or_else(|| meta.get(13)))
+            .and_then(|info| {
+                info.get(9).and_then(|extra| extra.get("ts")).or_else(|| {
+                    info.first()
+                        .and_then(Value::as_array)
+                        .and_then(|meta| meta.get(4).or_else(|| meta.get(13)))
+                })
+            })
             .and_then(epoch_millis);
     }
 
@@ -1134,6 +1330,7 @@ fn public_config(config: bilive_core::AppConfig) -> Value {
         "room_token_available": !config.room_token.is_empty(),
         "is_open_live": config.is_open_live,
         "streams": config.streams,
+        "danmu_notifications": config.danmu_notifications,
     })
 }
 
@@ -1308,10 +1505,36 @@ mod tests {
         assert_eq!(value["room_id"], 200);
         assert_eq!(value["username"], "tester");
         assert_eq!(value["room_token_available"], true);
+        assert_eq!(value["danmu_notifications"]["enabled"], false);
+        assert_eq!(value["danmu_notifications"]["expire_timeout_ms"], 0);
         assert!(value.get("cookies").is_none());
         assert!(value.get("csrf").is_none());
         assert!(value.get("room_token").is_none());
         assert!(!value.to_string().contains("room-token-secret"));
+    }
+
+    #[test]
+    fn extracts_plain_danmu_desktop_notification() {
+        let notification = danmu_notification_from_payload(
+            r#"{"cmd":"DANMU_MSG","info":[[0,1,25,0,123],"你好",[42,"Jamie"]]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(notification.kind, DanmuNotificationKind::Danmu);
+        assert_eq!(notification.title, "bilive - Jamie");
+        assert_eq!(notification.body, "你好");
+    }
+
+    #[test]
+    fn extracts_super_chat_desktop_notification() {
+        let notification = danmu_notification_from_payload(
+            r#"{"cmd":"SUPER_CHAT_MESSAGE","data":{"message":"SC 内容","price":30,"user_info":{"uname":"Jamie"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(notification.kind, DanmuNotificationKind::SuperChat);
+        assert_eq!(notification.title, "bilive - 醒目留言 30元");
+        assert_eq!(notification.body, "Jamie: SC 内容");
     }
 
     #[test]
@@ -1364,18 +1587,20 @@ mod tests {
         assert_eq!(payload["cmd"], "DANMU_MSG");
         assert_eq!(payload["info"][1], "你好");
         assert_eq!(payload["info"][2][1], "tester");
+        assert_eq!(payload["info"][9]["ts"], "1780000000");
+        assert_eq!(entries[0].sent_at, Some(1780000000000));
     }
 
     #[test]
     fn danmu_history_keeps_unique_entries_sorted_by_message_time() {
         let early = json!({
             "cmd": "DANMU_MSG",
-            "info": [[0, 1, 25, 16777215, 100], "early", [1, "a"], []]
+            "info": [[0, 1, 25, 16777215, 900], "early", [1, "a"], [], [], [], 0, 0, null, { "ts": 100 }]
         })
         .to_string();
         let late = json!({
             "cmd": "DANMU_MSG",
-            "info": [[0, 1, 25, 16777215, 200], "late", [2, "b"], []]
+            "info": [[0, 1, 25, 16777215, 100], "late", [2, "b"], [], [], [], 0, 0, null, { "ts": 200 }]
         })
         .to_string();
 
@@ -1388,8 +1613,36 @@ mod tests {
 
         let items = history.snapshot();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].id, "danmu:1:early:100");
-        assert_eq!(items[1].id, "danmu:2:late:200");
+        assert_eq!(items[0].id, "danmu:1:early:900");
+        assert_eq!(items[0].sent_at, Some(100000));
+        assert_eq!(items[1].id, "danmu:2:late:100");
+        assert_eq!(items[1].sent_at, Some(200000));
+    }
+
+    #[test]
+    fn danmu_history_preserves_arrival_order_with_same_message_time() {
+        let first = json!({
+            "cmd": "DANMU_MSG",
+            "info": [[0, 1, 25, 16777215, 300], "z later id", [9, "a"], [], [], [], 0, 0, null, { "ts": 100 }]
+        })
+        .to_string();
+        let second = json!({
+            "cmd": "DANMU_MSG",
+            "info": [[0, 1, 25, 16777215, 100], "a earlier id", [1, "b"], [], [], [], 0, 0, null, { "ts": 100 }]
+        })
+        .to_string();
+
+        let mut history = DanmuHistory::default();
+        assert!(history.push(DanmuHistoryEntry::from_payload(first, 20, None, "history").unwrap()));
+        assert!(
+            history.push(DanmuHistoryEntry::from_payload(second, 10, None, "history").unwrap())
+        );
+
+        let items = history.snapshot();
+        assert_eq!(items[0].id, "danmu:9:z later id:300");
+        assert_eq!(items[0].received_seq, 0);
+        assert_eq!(items[1].id, "danmu:1:a earlier id:100");
+        assert_eq!(items[1].received_seq, 1);
     }
 
     #[test]

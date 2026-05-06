@@ -9,7 +9,8 @@ const state = {
   chatCount: 0,
   chatLoaded: false,
   chatMessageIds: new Set(),
-  chatSort: "asc",
+  chatSort: "desc",
+  nextDanmuSeq: 0,
   eventCount: 0,
   qrPollTimer: null,
   streamCredentialsVisible: false,
@@ -57,6 +58,12 @@ const els = {
   connectDanmu: $("#connect-danmu"),
   disconnectDanmu: $("#disconnect-danmu"),
   refreshDanmuToken: $("#refresh-danmu-token"),
+  notifyEnabled: $("#notify-enabled"),
+  notifyDanmu: $("#notify-danmu"),
+  notifySuperChat: $("#notify-super-chat"),
+  notifyCooldown: $("#notify-cooldown"),
+  notifyExpireTimeout: $("#notify-expire-timeout"),
+  saveNotifications: $("#save-notifications"),
   commentMessage: $("#comment-message"),
   sendComment: $("#send-comment"),
   sortDanmu: $("#sort-danmu"),
@@ -143,6 +150,7 @@ function bindUi() {
   els.connectDanmu.addEventListener("click", () => void withLoading(els.connectDanmu, connectDanmu));
   els.disconnectDanmu.addEventListener("click", () => void withLoading(els.disconnectDanmu, disconnectDanmu));
   els.refreshDanmuToken.addEventListener("click", () => void withLoading(els.refreshDanmuToken, refreshDanmuToken));
+  els.saveNotifications.addEventListener("click", () => void withLoading(els.saveNotifications, saveNotifications));
   els.sendComment.addEventListener("click", () => void sendComment());
   els.commentMessage.addEventListener("keydown", (event) => {
     if (event.key === "Enter") { event.preventDefault(); void sendComment(); }
@@ -374,6 +382,19 @@ async function patchConfig(patch) {
   return config;
 }
 
+async function saveNotifications() {
+  await patchConfig({
+    danmu_notifications: {
+      enabled: els.notifyEnabled.checked,
+      danmu: els.notifyDanmu.checked,
+      super_chat: els.notifySuperChat.checked,
+      cooldown_secs: clampInteger(els.notifyCooldown.value, 0, 3600, 2),
+      expire_timeout_ms: clampInteger(els.notifyExpireTimeout.value, 0, 3600000, 0),
+    },
+  });
+  toast("提醒设置已保存");
+}
+
 function renderConfig() {
   const config = state.config || {};
   setStatus(els.authStatus, state.authenticated ? (config.username || "已登录") : "未登录", state.authenticated);
@@ -389,8 +410,17 @@ function renderConfig() {
   els.roomId.value = config.room_id || "";
   els.uid.value = config.uid || "";
   applyTheme(config.theme || "dark");
+  renderNotificationSettings(config.danmu_notifications || {});
   renderCategoryOptions();
   renderStreamList();
+}
+
+function renderNotificationSettings(settings) {
+  els.notifyEnabled.checked = Boolean(settings.enabled);
+  els.notifyDanmu.checked = settings.danmu !== false;
+  els.notifySuperChat.checked = settings.super_chat !== false;
+  els.notifyCooldown.value = String(clampInteger(settings.cooldown_secs, 0, 3600, 2));
+  els.notifyExpireTimeout.value = String(clampInteger(settings.expire_timeout_ms, 0, 3600000, 0));
 }
 
 async function setTheme(theme) {
@@ -577,11 +607,14 @@ function renderDanmuMessages(items) {
   state.chatCount = 0;
   els.chatList.replaceChildren();
 
-  for (const entry of sortedDanmuEntries(items)) {
+  const entries = sortedDanmuEntries(items);
+  state.nextDanmuSeq = entries.reduce((next, entry, index) => Math.max(next, entryReceivedSeq(entry, index) + 1), 0);
+
+  for (const [index, entry] of entries.entries()) {
     const parsed = tryParseJson(entry.payload);
     if (!parsed) continue;
     const receivedAt = entry.received_at ? new Date(Number(entry.received_at)) : new Date();
-    const options = { id: entry.id, timeline: entry.timeline || "", scroll: false };
+    const options = { id: entry.id, timeline: entry.timeline || "", receivedSeq: entryReceivedSeq(entry, index), scroll: false };
     if (String(parsed.cmd || "").startsWith("DANMU_MSG")) {
       pushDanmuMessage(parseDanmuMessage(parsed), entry.payload, receivedAt, options);
     } else if (parsed.cmd === "SUPER_CHAT_MESSAGE") {
@@ -604,6 +637,8 @@ function pushDanmuMessage(message, raw, receivedAt, options = {}) {
   const parsed = tryParseJson(raw);
   const id = options.id || danmuMessageId(parsed, raw);
   if (id && state.chatMessageIds.has(id)) return false;
+  const cardTime = danmuCardTime(parsed, receivedAt.getTime(), options.timeline || "");
+  const receivedSeq = options.receivedSeq ?? nextDanmuReceivedSeq();
   const shouldStickToEdge = options.scroll !== false && (state.chatSort === "asc" ? isNearBottom(els.chatList) : isNearTop(els.chatList));
   const previousHeight = els.chatList.scrollHeight;
   const empty = els.chatList.querySelector(".empty-state");
@@ -611,7 +646,9 @@ function pushDanmuMessage(message, raw, receivedAt, options = {}) {
 
   const item = document.createElement("article");
   item.className = `danmu-message ${message.tone || ""}`;
-  item.dataset.sortAt = String(danmuSortAt(parsed, receivedAt));
+  item.dataset.sortAt = String(cardTime.sortAt);
+  item.dataset.receivedSeq = String(receivedSeq);
+  item.dataset.messageId = id || "";
   const avatar = document.createElement("div");
   const main = document.createElement("div");
   const meta = document.createElement("div");
@@ -626,7 +663,7 @@ function pushDanmuMessage(message, raw, receivedAt, options = {}) {
   meta.className = "danmu-message-meta";
   name.className = "danmu-name";
   name.textContent = message.name;
-  time.textContent = options.timeline || receivedAt.toLocaleTimeString();
+  time.textContent = cardTime.text;
   text.className = "danmu-text";
   text.textContent = message.content || "(空消息)";
   reply.className = "danmu-reply";
@@ -692,6 +729,7 @@ function clearLogs() {
   state.chatCount = 0;
   state.chatLoaded = false;
   state.chatMessageIds = new Set();
+  state.nextDanmuSeq = 0;
   state.eventCount = 0;
   updateDanmuCounters();
 }
@@ -770,57 +808,125 @@ function danmuMessageId(parsed, raw) {
 }
 
 function sortedDanmuEntries(items) {
-  const entries = Array.isArray(items) ? [...items] : [];
-  entries.sort((left, right) => compareDanmuSortAt(entrySortAt(left), entrySortAt(right)));
-  return entries;
+  const entries = Array.isArray(items) ? items.map((entry, index) => ({ entry, index })) : [];
+  entries.sort((left, right) => compareDanmuSortKeys(entrySortKey(left.entry, left.index), entrySortKey(right.entry, right.index)));
+  return entries.map(({ entry }) => entry);
 }
 
-function entrySortAt(entry) {
+function entrySortKey(entry, fallbackSeq = 0) {
   const parsed = tryParseJson(entry?.payload);
-  return danmuSortAt(parsed, entry?.received_at ? new Date(Number(entry.received_at)) : new Date(0));
+  const cardTime = danmuCardTime(parsed, Number(entry?.sent_at) || Number(entry?.received_at) || 0, entry?.timeline || "");
+  return {
+    sortAt: cardTime.sortAt,
+    receivedSeq: entryReceivedSeq(entry, fallbackSeq),
+    id: String(entry?.id || ""),
+  };
 }
 
 function insertDanmuItem(item) {
-  if (state.chatSort === "desc") {
-    els.chatList.prepend(item);
-  } else {
-    els.chatList.append(item);
+  const messages = Array.from(els.chatList.querySelectorAll(".danmu-message"));
+  for (const message of messages) {
+    const comparison = compareDanmuElements(message, item);
+    if (state.chatSort === "asc" ? comparison > 0 : comparison < 0) {
+      els.chatList.insertBefore(item, message);
+      return;
+    }
   }
+  els.chatList.append(item);
 }
 
 function sortRenderedDanmuMessages() {
   const messages = Array.from(els.chatList.querySelectorAll(".danmu-message"));
   if (messages.length === 0) return false;
-  messages.sort((left, right) => compareDanmuSortAt(Number(left.dataset.sortAt || 0), Number(right.dataset.sortAt || 0)));
+  messages.sort(compareDanmuElements);
   if (state.chatSort === "desc") messages.reverse();
   els.chatList.replaceChildren(...messages);
   return true;
 }
 
-function compareDanmuSortAt(left, right) {
+function compareDanmuElements(left, right) {
+  return compareDanmuSortKeys(elementSortKey(left), elementSortKey(right));
+}
+
+function compareDanmuSortKeys(left, right) {
+  return compareNumber(left.sortAt, right.sortAt)
+    || compareNumber(left.receivedSeq, right.receivedSeq)
+    || left.id.localeCompare(right.id);
+}
+
+function compareNumber(left, right) {
   const leftValue = Number.isFinite(left) ? left : 0;
   const rightValue = Number.isFinite(right) ? right : 0;
   return leftValue - rightValue;
 }
 
-function danmuSortAt(parsed, fallbackDate) {
+function elementSortKey(element) {
+  return {
+    sortAt: Number(element.dataset.sortAt || 0),
+    receivedSeq: Number(element.dataset.receivedSeq || 0),
+    id: element.dataset.messageId || "",
+  };
+}
+
+function entryReceivedSeq(entry, fallback = 0) {
+  const value = Number(entry?.received_seq);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function nextDanmuReceivedSeq() {
+  const value = state.nextDanmuSeq;
+  state.nextDanmuSeq += 1;
+  return value;
+}
+
+function danmuCardTime(parsed, fallbackMillis, timeline = "") {
+  const sentAt = danmuSortAt(parsed, fallbackMillis);
+  const text = timeline || new Date(sentAt).toLocaleTimeString();
+  return { text, sortAt: cardTimeSortAt(text, sentAt) };
+}
+
+function cardTimeSortAt(text, fallbackMillis) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return fallbackMillis;
+
+  const normalized = trimmed.replace(" ", "T");
+  const parsed = Date.parse(normalized);
+  if (Number.isFinite(parsed)) return parsed;
+
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed);
+  if (match) {
+    const base = new Date(fallbackMillis || Date.now());
+    base.setHours(Number(match[1]), Number(match[2]), Number(match[3] || 0), 0);
+    return base.getTime();
+  }
+
+  return fallbackMillis;
+}
+
+function danmuSortAt(parsed, fallbackMillis) {
   const cmd = String(parsed?.cmd || "");
   if (cmd.startsWith("DANMU_MSG")) {
     const info = Array.isArray(parsed.info) ? parsed.info : [];
     const meta = Array.isArray(info[0]) ? info[0] : [];
-    return epochMillis(meta[4] ?? meta[13]) || fallbackDate.getTime();
+    return epochMillis(info[9]?.ts ?? meta[4] ?? meta[13]) || fallbackMillis;
   }
   if (cmd === "SUPER_CHAT_MESSAGE") {
     const data = parsed.data || {};
-    return epochMillis(data.ts ?? data.start_time ?? data.time) || fallbackDate.getTime();
+    return epochMillis(data.ts ?? data.start_time ?? data.time) || fallbackMillis;
   }
-  return fallbackDate.getTime();
+  return fallbackMillis;
 }
 
 function epochMillis(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return 0;
   return number >= 100000000000 ? number : number * 1000;
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(number)));
 }
 
 function valueText(value) {

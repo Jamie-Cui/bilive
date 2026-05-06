@@ -5,6 +5,7 @@
 [package]
 name = "bilive"
 version = "0.1.0"
+description = "Local Bilibili live management service"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,3 +25,31 @@ reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[package.metadata.generate-rpm]
+release = "1"
+summary = "Local Bilibili live management service"
+post_install_script = """
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+"""
+pre_uninstall_script = """
+if [ "${1:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --no-reload disable --now bilive.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+"""
+assets = [
+  { source = "target/release/bilive", dest = "/usr/bin/bilive", mode = "755" },
+  { source = "packaging/rpm/bilive.service", dest = "/usr/lib/systemd/system/bilive.service", mode = "644" },
+  { source = "README.md", dest = "/usr/share/doc/bilive/README.md", mode = "644", doc = true },
+  { source = "LICENSE", dest = "/usr/share/licenses/bilive/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

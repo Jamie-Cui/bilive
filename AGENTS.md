@@ -8,17 +8,23 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 ## Project Structure & Module Organization
 
-This repository is a Rust workspace with a no-build static web UI.
+This repository is a Rust workspace with an embedded, no-build static web UI.
 
 - `crates/bilive-cli/`: command-line entry point, foreground `bilive serve`,
   and background `start`/`stop`/`status`/`restart` control.
-- `crates/bilive-server/`: axum HTTP/WebSocket service, API routes, QR SVG rendering, and static file serving.
-- `crates/bilive-core/`: Bilibili HTTP client, WBI/app signing, state storage, danmu client, and shared event types.
-- `web/`: plain `index.html`, `styles.css`, and `app.js`; no npm, Vite, or frontend build step.
-- `packaging/systemd/`: Linux service unit templates.
+- `crates/bilive-server/`: axum HTTP/WebSocket service, API routes, QR SVG
+  rendering, embedded/static file serving, danmu history, notifications, and
+  stream testing.
+- `crates/bilive-core/`: Bilibili HTTP client, WBI/app signing, config storage,
+  stream credential parsing, danmu client/protocol, and shared event types.
+- `web/`: plain `index.html`, `styles.css`, `app.js`, and `favicon.svg`; no
+  npm, Vite, bundler, or generated frontend artifacts.
+- `packaging/systemd/` and `packaging/rpm/`: Linux service unit templates.
+- `xtask/`: helper commands, currently `cargo build-rpm`.
 - `Cargo.toml` and `Cargo.lock`: workspace manifest and locked Rust dependencies.
 
-Keep tests near the Rust module they cover with inline `#[cfg(test)]` modules or crate-local `tests/`.
+Keep tests near the Rust module they cover with inline `#[cfg(test)]` modules
+or crate-local `tests/`.
 
 ## Build, Test, and Development Commands
 
@@ -27,50 +33,80 @@ Keep tests near the Rust module they cover with inline `#[cfg(test)]` modules or
 - `cargo check --workspace`: type-check the complete workspace.
 - `cargo test --workspace`: run all Rust tests.
 - `node --check web/app.js`: validate frontend JavaScript syntax.
-- `cargo run -p bilive -- serve --listen 127.0.0.1:22333 --web-dir web`: run the local service and web UI.
-- `cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web`: start the local service in the background.
-- `cargo run -p bilive -- status` / `cargo run -p bilive -- stop`: inspect
-  or stop the background service.
-- `cargo build --release -p bilive`: build the release binary.
+- `cargo run -p bilive -- serve --listen 127.0.0.1:22333 --web-dir web`: run
+  the local service and serve UI files from the working tree.
+- `cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web`: start
+  the local service in the background.
+- `cargo run -p bilive -- status` / `cargo run -p bilive -- stop`: inspect or
+  stop the background service.
+- `cargo build --release -p bilive`: build the release binary with embedded UI
+  assets.
+- `cargo build-rpm`: build the release binary and generate an RPM through
+  `xtask`; requires `cargo-generate-rpm`.
 
-The frontend is served directly from `web/`; edit files and refresh the
-browser. `serve` is hidden from the top-level help but is used by the
-background CLI child process and the systemd unit.
+The frontend is embedded into the Rust binary by default. During UI work, pass
+`--web-dir web`, edit files directly, and refresh the browser. Rebuild the Rust
+binary before relying on embedded UI assets. `serve` is hidden from top-level
+help but is used by foreground development, the background CLI child process,
+and systemd units.
 
 ## Coding Style & Naming Conventions
 
-Use standard Rust formatting via `rustfmt`. Keep protocol and Bilibili logic in `bilive-core`, HTTP routing in `bilive-server`, and CLI parsing in `bilive-cli`.
+Use standard Rust formatting via `rustfmt`. Keep protocol and Bilibili logic in
+`bilive-core`, HTTP routing in `bilive-server`, and CLI parsing/background
+control in `bilive-cli`.
 
-Rust names should follow idiomatic conventions: `snake_case` for functions/modules, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Keep JavaScript in `web/app.js` simple and dependency-free.
+Rust names should follow idiomatic conventions: `snake_case` for
+functions/modules, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for
+constants. Keep JavaScript in `web/app.js` simple and dependency-free.
 
 Keep public API config responses routed through the server-side public config
-shape; do not return raw cookies, CSRF tokens, or danmu tokens. When changing
-stream credential handling, preserve stream-key redaction in logs and error
-messages.
+shape; do not return raw cookies, CSRF tokens, danmu tokens, or raw stream keys.
+When changing stream credential handling, preserve stream-key redaction in logs,
+`ffmpeg` stderr sanitization, and error messages.
 
 ## Testing Guidelines
 
-Add unit tests for signing, protocol parsing, event serialization, state storage, and request handling. Use names like `decodes_brotli_danmu_packet`. Run `cargo test --workspace` before submitting.
+Add unit tests for signing, protocol parsing, event serialization, state/config
+storage, route helpers, and request handling. Use descriptive names like
+`decodes_brotli_danmu_packet`. Run `cargo test --workspace` before submitting.
 
-For CLI background-service changes, cover pid/log path derivation and stale pid
-behavior where practical. For stream-test changes, keep tests around URL
-joining, stderr sanitization, and short failure messages.
+For CLI background-service changes, cover pid/log path derivation, web-dir
+resolution, and stale pid behavior where practical. For stream-test changes,
+keep tests around URL joining, stderr sanitization, and short failure messages.
+For frontend-only changes, run `node --check web/app.js`.
 
 ## Commit & Pull Request Guidelines
 
-This repository currently has no commit history, so there is no established local convention. Use concise imperative commits, optionally scoped, for example:
+This repository currently has no commit history, so there is no established
+local convention. Use concise imperative commits, optionally scoped, for example:
 
 - `core: add danmu packet decoder tests`
 - `server: expose login status endpoint`
 - `web: simplify connection form`
 
-Pull requests should include a short summary, verification commands run, and screenshots or notes for visible UI changes. Link related issues when available and call out service, storage, or systemd behavior changes explicitly.
+Pull requests should include a short summary, verification commands run, and
+screenshots or notes for visible UI changes. Link related issues when available
+and call out service, storage/config, packaging, or systemd behavior changes
+explicitly.
 
 ## Security & Configuration Tips
 
-Default services should listen on `127.0.0.1`, not `0.0.0.0`. Do not log cookies, CSRF tokens, danmu tokens, or stream keys. Keep state paths compatible with `/var/lib/bilive`, `BILIVE_STATE_DIR`, and cross-platform CLI use.
+Default services should listen on `127.0.0.1`, not `0.0.0.0`. Do not log
+cookies, CSRF tokens, danmu tokens, or stream keys. Keep state paths compatible
+with `/var/lib/bilive`, `BILIVE_STATE_DIR`, and cross-platform CLI use.
 
-`--config`/`BILIVE_CONFIG` select the JSON config file.
+`--config`/`BILIVE_CONFIG` select the JSON config file. The default config path
+is under the platform config directory, such as `~/.config/bilive/config` on
+Linux-like systems; the old state-dir `config.json` is only a compatibility
+fallback when no explicit config path is set.
+
 `--state-dir`/`BILIVE_STATE_DIR` control background pid/log placement and the
-default base directory for `config.json`. `BILIVE_FFMPEG` can point stream
-testing at a non-default `ffmpeg` binary.
+legacy config fallback path. `--pid-file`, `--log-file`, and `--timeout` tune
+background control behavior. `BILIVE_FFMPEG` can point stream testing at a
+non-default `ffmpeg` binary.
+
+Danmu desktop notifications are disabled by default and controlled by
+`danmu_notifications` in config or the web UI. Linux notifications use
+`notify-send`; prefer running `bilive start` from the user session, or use a
+systemd user service, when desktop notifications must reach the compositor.

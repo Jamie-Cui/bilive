@@ -709,6 +709,9 @@ impl BiliClient {
                 if let Some(value) = patch.get("theme").and_then(Value::as_str) {
                     config.theme = value.to_string();
                 }
+                if let Some(value) = patch.get("danmu_notifications") {
+                    patch_danmu_notifications(&mut config.danmu_notifications, value);
+                }
             })
             .await?)
     }
@@ -1006,6 +1009,24 @@ fn extract_key(value: &str) -> String {
     filename.split('.').next().unwrap_or(filename).to_string()
 }
 
+fn patch_danmu_notifications(config: &mut crate::DanmuNotificationConfig, patch: &Value) {
+    if let Some(value) = patch.get("enabled").and_then(Value::as_bool) {
+        config.enabled = value;
+    }
+    if let Some(value) = patch.get("danmu").and_then(Value::as_bool) {
+        config.danmu = value;
+    }
+    if let Some(value) = patch.get("super_chat").and_then(Value::as_bool) {
+        config.super_chat = value;
+    }
+    if let Some(value) = patch.get("cooldown_secs").and_then(Value::as_u64) {
+        config.cooldown_secs = value.min(3600);
+    }
+    if let Some(value) = patch.get("expire_timeout_ms").and_then(Value::as_u64) {
+        config.expire_timeout_ms = value.min(3_600_000);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,6 +1251,13 @@ mod tests {
                 "category_id": "12",
                 "area_id": "34",
                 "theme": "dark",
+                "danmu_notifications": {
+                    "enabled": true,
+                    "danmu": false,
+                    "super_chat": true,
+                    "cooldown_secs": 7,
+                    "expire_timeout_ms": 5000
+                },
                 "uid": 999,
                 "room_id": 888,
                 "ignored": "value",
@@ -1241,11 +1269,19 @@ mod tests {
         assert_eq!(updated.category_id, "12");
         assert_eq!(updated.area_id, "34");
         assert_eq!(updated.theme, "dark");
+        assert!(updated.danmu_notifications.enabled);
+        assert!(!updated.danmu_notifications.danmu);
+        assert!(updated.danmu_notifications.super_chat);
+        assert_eq!(updated.danmu_notifications.cooldown_secs, 7);
+        assert_eq!(updated.danmu_notifications.expire_timeout_ms, 5000);
         assert_eq!(updated.uid, 42);
         assert_eq!(updated.room_id, 100);
 
         let reloaded = ConfigStore::load(Some(path.clone())).await.unwrap();
-        assert_eq!(reloaded.get().await.theme, "dark");
+        let reloaded = reloaded.get().await;
+        assert_eq!(reloaded.theme, "dark");
+        assert_eq!(reloaded.danmu_notifications.cooldown_secs, 7);
+        assert_eq!(reloaded.danmu_notifications.expire_timeout_ms, 5000);
 
         let _ = tokio::fs::remove_dir_all(parent).await;
     }

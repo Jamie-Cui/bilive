@@ -6,3 +6,22 @@
 /.DS_Store
 /.agent-shell/
 /.codex
+
+# Local editor and OS files
+*.swp
+*.swo
+*~
+
+# Local service/runtime output
+*.log
+*.pid
+/bilive.log
+/bilive.pid
+
+# Local app config/state when testing with repo-relative paths
+/config
+/config.json
+/.bilive/
+/.cargo/
+/packaging/rpm/
+/xtask/

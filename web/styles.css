@@ -458,6 +458,31 @@ label, .inline-label {
   gap: 5px;
 }
 
+.notification-settings {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin: 12px 0;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.check-row input {
+  min-height: auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 .label-text {
   font-size: 12px;
   font-weight: 500;
@@ -834,7 +859,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .chat-composer {
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   display: flex;
   gap: 8px;
   padding: 12px;
@@ -1163,7 +1188,7 @@ input:focus, select:focus, textarea:focus {
     padding: 12px 16px;
   }
 
-  .form-grid, .form-grid-3, .form-grid-4 {
+  .form-grid, .form-grid-3, .form-grid-4, .notification-settings {
     grid-template-columns: 1fr;
   }
 

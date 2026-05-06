@@ -212,6 +212,29 @@ SPDX-License-Identifier: GPL-3.0-or-later
                       <input id="port" inputmode="numeric" value="2243" />
                     </label>
                   </div>
+                  <div class="notification-settings">
+                    <label class="check-row">
+                      <input id="notify-enabled" type="checkbox" />
+                      <span>系统弹幕提醒</span>
+                    </label>
+                    <label class="check-row">
+                      <input id="notify-danmu" type="checkbox" />
+                      <span>普通弹幕</span>
+                    </label>
+                    <label class="check-row">
+                      <input id="notify-super-chat" type="checkbox" />
+                      <span>醒目留言</span>
+                    </label>
+                    <label>
+                      <span class="label-text">限频秒数</span>
+                      <input id="notify-cooldown" type="number" min="0" max="3600" step="1" />
+                    </label>
+                    <label>
+                      <span class="label-text">显示毫秒</span>
+                      <input id="notify-expire-timeout" type="number" min="0" max="3600000" step="100" />
+                    </label>
+                    <button class="btn btn-ghost btn-sm" id="save-notifications" type="button">保存提醒</button>
+                  </div>
                   <button class="btn btn-ghost btn-sm" id="refresh-danmu-token" type="button">刷新弹幕 Token</button>
                 </div>
               </section>
@@ -225,20 +248,20 @@ SPDX-License-Identifier: GPL-3.0-or-later
                     <span id="chat-count">0 条</span>
                   </div>
                   <div class="feed-actions">
-                    <button class="btn btn-ghost btn-sm" id="sort-danmu" type="button">早到晚</button>
+                    <button class="btn btn-ghost btn-sm" id="sort-danmu" type="button">晚到早</button>
                     <button class="btn btn-ghost btn-sm" id="load-danmu-history" type="button">加载本场</button>
                     <button class="btn btn-ghost btn-sm" id="clear-logs" type="button">清空</button>
                   </div>
+                </div>
+                <div class="chat-composer">
+                  <input id="comment-message" placeholder="输入回复内容，回车发送" />
+                  <button class="btn btn-primary" id="send-comment" type="button">发送</button>
                 </div>
                 <div class="chat-list" id="chat-list">
                   <div class="empty-state">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     <span>暂无弹幕</span>
                   </div>
-                </div>
-                <div class="chat-composer">
-                  <input id="comment-message" placeholder="输入回复内容，回车发送" />
-                  <button class="btn btn-primary" id="send-comment" type="button">发送</button>
                 </div>
               </section>
 

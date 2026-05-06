@@ -7,8 +7,8 @@ browser admin UI from `web/`.
 The project has three main pieces:
 
 - A Rust CLI and service backend.
-- A plain HTML/CSS/JavaScript admin UI with no frontend build step.
-- Linux systemd packaging kept separate from the service implementation.
+- An embedded, plain HTML/CSS/JavaScript admin UI with no frontend build step.
+- Linux systemd and RPM packaging kept separate from the service implementation.
 
 ## Features
 
@@ -30,7 +30,8 @@ crates/
   bilive-core/      # Bilibili API client, signing, state, danmu, events
   bilive-server/    # axum HTTP/WebSocket routes and static file serving
 web/                # No-build static admin UI
-packaging/systemd/  # Linux service unit template
+packaging/          # systemd and RPM service units
+xtask/              # packaging helpers, including cargo build-rpm
 ```
 
 ## Quick Start
@@ -66,6 +67,10 @@ cargo run -p bilive -- stop
 `--pid-file` or `--log-file` is provided. `serve` runs the same service in the
 foreground and is the command used by the systemd unit.
 
+The `serve` subcommand is hidden from top-level help because it is mostly an
+implementation detail for foreground development, the background child process,
+and service managers.
+
 If you use non-default state paths, pass the same `--state-dir`, `--pid-file`,
 or `--log-file` values to `status`, `restart`, and `stop`. If you use a
 non-default listen address, pass the same `--listen` value to `status` for the
@@ -73,8 +78,24 @@ health check.
 
 ## Configuration
 
-Runtime state is stored as JSON. By default, `config.json`, `bilive.pid`, and
-`bilive.log` live under the platform state directory. On Linux this is usually:
+The application config is stored as JSON. By default, the config file lives at:
+
+```text
+~/.config/bilive/config
+```
+
+When `XDG_CONFIG_HOME` is set, the default config path is:
+
+```text
+$XDG_CONFIG_HOME/bilive/config
+```
+
+For compatibility, if the new default config path does not exist, bilive will
+read the previous default `config.json` from the state directory once and write
+future saves to the new config path.
+
+Background runtime state is separate. `start` writes `bilive.pid` and
+`bilive.log` under the platform state directory. On Linux this is usually:
 
 ```text
 ~/.local/state/bilive
@@ -86,9 +107,22 @@ Useful overrides:
 - `--listen` or `BILIVE_LISTEN`: service bind address.
 - `--web-dir` or `BILIVE_WEB_DIR`: override the embedded UI with a static UI
   directory.
-- `--state-dir` or `BILIVE_STATE_DIR`: state directory for background control,
-  and the default base directory for `config.json`.
+- `--state-dir` or `BILIVE_STATE_DIR`: state directory for background control.
+- `--pid-file` and `--log-file`: explicit background pid and log files.
+- `--timeout`: seconds to wait for health checks or shutdown during background
+  control operations.
 - `BILIVE_FFMPEG`: `ffmpeg` executable used by the stream test endpoint.
+- `RUST_LOG`: tracing filter; the default enables bilive crates and
+  `tower_http` at `info` level.
+
+Danmu desktop notifications are off by default. Enable them from the danmu
+settings in the web UI, or set `danmu_notifications.enabled` in the config
+file. `danmu_notifications.expire_timeout_ms` controls the requested display
+duration on Linux; `0` uses the notification daemon default. On Linux, bilive
+calls `notify-send`, so Wayland compositors such as Hyprland need a notification
+daemon like `mako`, `dunst`, or `swaync` running in the user session. System
+services usually cannot reach the desktop session; use `bilive start` from the
+user session or a systemd user service for desktop notifications.
 
 ## Development
 
@@ -103,6 +137,12 @@ node --check web/app.js
 
 The workspace uses Rust 2024 and the Rust version declared in `Cargo.toml`.
 The frontend has no npm, Vite, or bundler dependency.
+
+For RPM packaging, the repository defines a Cargo alias:
+
+```bash
+cargo build-rpm
+```
 
 ## Service Install
 
@@ -128,6 +168,31 @@ sudo systemctl enable --now bilive.service
 
 The packaged service listens on `127.0.0.1:22333`, stores state in
 `/var/lib/bilive`, and sets conservative systemd sandboxing options.
+
+## RPM Package
+
+Install the RPM packaging helper once:
+
+```bash
+cargo install cargo-generate-rpm
+```
+
+Then build the release binary and generate the RPM from the workspace root:
+
+```bash
+cargo build-rpm
+```
+
+The RPM is written under `target/generate-rpm/`. It installs `bilive` to
+`/usr/bin/bilive`, installs the systemd unit to
+`/usr/lib/systemd/system/bilive.service`, and uses the embedded web UI.
+
+Install and start it with:
+
+```bash
+sudo dnf install ./target/generate-rpm/bilive-*.rpm
+sudo systemctl enable --now bilive.service
+```
 
 ## Security Notes
 

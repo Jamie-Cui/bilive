@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     env,
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -23,6 +24,28 @@ pub struct StreamCredential {
     pub kind: String,
     pub address: String,
     pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DanmuNotificationConfig {
+    pub enabled: bool,
+    pub danmu: bool,
+    pub super_chat: bool,
+    pub cooldown_secs: u64,
+    pub expire_timeout_ms: u64,
+}
+
+impl Default for DanmuNotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            danmu: true,
+            super_chat: true,
+            cooldown_secs: 2,
+            expire_timeout_ms: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +67,7 @@ pub struct AppConfig {
     pub room_token: String,
     pub is_open_live: bool,
     pub streams: Vec<StreamCredential>,
+    pub danmu_notifications: DanmuNotificationConfig,
 }
 
 impl Default for AppConfig {
@@ -65,6 +89,7 @@ impl Default for AppConfig {
             room_token: String::new(),
             is_open_live: false,
             streams: Vec::new(),
+            danmu_notifications: DanmuNotificationConfig::default(),
         }
     }
 }
@@ -127,12 +152,12 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub async fn load(path: Option<PathBuf>) -> std::io::Result<Self> {
+        let explicit_path = path.is_some();
         let path = Arc::new(path.unwrap_or_else(default_config_path));
-        let config = if path.exists() {
-            let content = tokio::fs::read_to_string(path.as_ref()).await?;
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            AppConfig::default()
+        let config = match read_config_if_exists(path.as_ref()).await? {
+            Some(config) => config,
+            None if explicit_path => AppConfig::default(),
+            None => read_legacy_default_config().await?.unwrap_or_default(),
         };
 
         Ok(Self {
@@ -177,6 +202,19 @@ impl ConfigStore {
     }
 }
 
+async fn read_config_if_exists(path: &Path) -> std::io::Result<Option<AppConfig>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(Some(serde_json::from_str(&content).unwrap_or_default()))
+}
+
+async fn read_legacy_default_config() -> std::io::Result<Option<AppConfig>> {
+    read_config_if_exists(&legacy_default_config_path()).await
+}
+
 pub fn default_state_dir() -> PathBuf {
     if let Some(path) = env::var_os("BILIVE_STATE_DIR") {
         return PathBuf::from(path);
@@ -217,7 +255,54 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 pub fn default_config_path() -> PathBuf {
+    default_config_dir().join("config")
+}
+
+fn legacy_default_config_path() -> PathBuf {
     default_state_dir().join("config.json")
+}
+
+pub fn default_config_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(path) = non_empty_os_string(env::var_os("APPDATA")) {
+            return PathBuf::from(path).join("bilive");
+        }
+
+        if let Some(home) = non_empty_os_string(env::var_os("USERPROFILE")) {
+            return PathBuf::from(home)
+                .join("AppData")
+                .join("Roaming")
+                .join("bilive");
+        }
+
+        PathBuf::from(".").join("bilive")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        default_config_dir_from_env(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
+    }
+}
+
+fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.is_empty())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_config_dir_from_env(
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> PathBuf {
+    if let Some(path) = non_empty_os_string(xdg_config_home) {
+        return PathBuf::from(path).join("bilive");
+    }
+
+    if let Some(home) = non_empty_os_string(home) {
+        return PathBuf::from(home).join(".config").join("bilive");
+    }
+
+    PathBuf::from(".").join(".config").join("bilive")
 }
 
 pub fn parse_cookie_header(cookie_header: &str) -> Vec<AppCookie> {
@@ -253,6 +338,23 @@ mod tests {
                 std::process::id()
             ))
             .join("config.json")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn default_config_path_uses_xdg_config_home() {
+        let path =
+            default_config_dir_from_env(Some("/tmp/bilive-config".into()), None).join("config");
+
+        assert_eq!(path, PathBuf::from("/tmp/bilive-config/bilive/config"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn default_config_path_falls_back_to_home_config() {
+        let path = default_config_dir_from_env(None, Some("/home/alice".into())).join("config");
+
+        assert_eq!(path, PathBuf::from("/home/alice/.config/bilive/config"));
     }
 
     #[test]
@@ -383,6 +485,17 @@ mod tests {
         assert!(config.streams.is_empty());
     }
 
+    #[test]
+    fn danmu_notifications_default_to_disabled() {
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+
+        assert!(!config.danmu_notifications.enabled);
+        assert!(config.danmu_notifications.danmu);
+        assert!(config.danmu_notifications.super_chat);
+        assert_eq!(config.danmu_notifications.cooldown_secs, 2);
+        assert_eq!(config.danmu_notifications.expire_timeout_ms, 0);
+    }
+
     #[tokio::test]
     async fn config_store_loads_default_and_persists_updates() {
         let path = unique_config_path("persist");
@@ -429,6 +542,20 @@ mod tests {
         let store = ConfigStore::load(Some(path.clone())).await.unwrap();
 
         assert_eq!(store.get().await.theme, "light");
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_config_path_ignores_legacy_default_config() {
+        let path = unique_config_path("explicit");
+        let parent = path.parent().unwrap().to_path_buf();
+
+        let store = ConfigStore::load(Some(path)).await.unwrap();
+        let config = store.get().await;
+
+        assert_eq!(config.theme, AppConfig::default().theme);
+        assert_eq!(config.room_id, 0);
+        assert!(config.cookies.is_empty());
         let _ = tokio::fs::remove_dir_all(parent).await;
     }
 }

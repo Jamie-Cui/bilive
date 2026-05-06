@@ -755,7 +755,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .chat-feed {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 

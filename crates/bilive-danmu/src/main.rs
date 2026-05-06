@@ -24,7 +24,7 @@ const DEFAULT_URL: &str = "http://127.0.0.1:22333";
 const DEFAULT_MAX_MESSAGES: usize = 500;
 const HISTORY_REFRESH_SECS: u64 = 30;
 const RECONNECT_SECS: u64 = 2;
-const DRAW_INTERVAL_MILLIS: u64 = 250;
+const DRAW_INTERVAL_MILLIS: u64 = 1000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -243,8 +243,9 @@ async fn main() -> anyhow::Result<()> {
                 draw(&mut terminal, &mut app)?;
             }
             Some(event) = ui_rx.recv() => {
-                handle_ui_event(event, &mut app);
-                draw(&mut terminal, &mut app)?;
+                if handle_ui_event(event, &mut app) {
+                    draw(&mut terminal, &mut app)?;
+                }
             }
             _ = refresh_tick.tick() => {
                 if should_refresh_history(args.refresh_interval, &app) {
@@ -508,12 +509,13 @@ fn handle_input(
     false
 }
 
-fn handle_ui_event(event: UiEvent, app: &mut App) {
+fn handle_ui_event(event: UiEvent, app: &mut App) -> bool {
     match event {
         UiEvent::Event(event) => match event {
             Event::Connection(status) => {
                 app.connected = matches!(status, ConnectionStatus::Connected);
                 app.set_status(connection_status_text(status), LineKind::System);
+                true
             }
             Event::Error { message } => {
                 app.set_status(format!("服务错误: {message}"), LineKind::Error);
@@ -530,6 +532,7 @@ fn handle_ui_event(event: UiEvent, app: &mut App) {
                     price: None,
                     kind: LineKind::Error,
                 });
+                true
             }
             Event::DanmuRaw { payload } => {
                 let now = now_millis();
@@ -540,16 +543,19 @@ fn handle_ui_event(event: UiEvent, app: &mut App) {
                     let line = system_line_from_payload(&payload, now, app.next_sequence());
                     app.add_line(line);
                 }
+                false
             }
         },
         UiEvent::WsStatus(result) => match result {
             Ok(()) => {
                 app.ws_connected = true;
                 app.set_status("事件流已连接", LineKind::System);
+                true
             }
             Err(message) => {
                 app.ws_connected = false;
                 app.set_status(format!("事件流断开: {message}"), LineKind::Error);
+                true
             }
         },
         UiEvent::History(result) => {
@@ -558,6 +564,7 @@ fn handle_ui_event(event: UiEvent, app: &mut App) {
                 Ok(result) => app.add_history(result),
                 Err(message) => app.set_status(format!("刷新历史失败: {message}"), LineKind::Error),
             }
+            true
         }
     }
 }

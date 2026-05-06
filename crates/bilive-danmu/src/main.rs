@@ -15,16 +15,16 @@ use std::{
     mem,
     sync::mpsc as std_mpsc,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::mpsc, time};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:22333";
 const DEFAULT_MAX_MESSAGES: usize = 500;
-const HISTORY_REFRESH_SECS: u64 = 30;
+const HISTORY_REFRESH_SECS: u64 = 0;
 const RECONNECT_SECS: u64 = 2;
-const DRAW_INTERVAL_MILLIS: u64 = 1000;
+const ESCAPE_SEQUENCE_TIMEOUT_MILLIS: i32 = 25;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,7 +45,7 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_MAX_MESSAGES)]
     max_messages: usize,
 
-    /// Periodic recent-history refresh interval in seconds. Use 0 to disable.
+    /// Periodic recent-history refresh interval in seconds. The event stream updates immediately; use 0 to disable history polling.
     #[arg(long, default_value_t = HISTORY_REFRESH_SECS)]
     refresh_interval: u64,
 
@@ -100,7 +100,6 @@ struct DanmuHistoryEntry {
     received_at: u64,
     received_seq: u64,
     sent_at: Option<u64>,
-    timeline: Option<String>,
 }
 
 #[derive(Debug)]
@@ -108,6 +107,12 @@ enum UiEvent {
     Event(Event),
     WsStatus(Result<(), String>),
     History(Result<HistoryResult, String>),
+    Comment {
+        message: String,
+        result: Result<(), String>,
+    },
+    RefreshDue,
+    Resize,
 }
 
 #[derive(Debug)]
@@ -119,14 +124,20 @@ struct HistoryResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Input {
-    Quit,
-    Refresh,
+    Enter,
+    Escape,
+    Backspace,
+    Delete,
+    ClearInput,
+    CursorLeft,
+    CursorRight,
+    Home,
+    End,
     Up,
     Down,
     PageUp,
     PageDown,
-    Top,
-    Bottom,
+    Char(char),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,8 +186,10 @@ struct App {
     scroll: usize,
     status: String,
     status_kind: LineKind,
-    last_history_refresh: Option<Instant>,
     refreshing: bool,
+    input: String,
+    input_cursor: usize,
+    sending_comment: bool,
 }
 
 #[tokio::main]
@@ -222,15 +235,16 @@ async fn main() -> anyhow::Result<()> {
     let (input_tx, mut input_rx) = mpsc::channel(64);
     spawn_ws_task(service.ws_url("/api/events"), ui_tx.clone());
     spawn_input_thread(input_tx);
+    spawn_resize_task(ui_tx.clone());
 
     if !args.no_history {
         app.refreshing = true;
-        app.last_history_refresh = Some(Instant::now());
         spawn_history_task(api.clone(), room_id, ui_tx.clone());
     }
+    if args.refresh_interval > 0 {
+        spawn_refresh_timer(args.refresh_interval, ui_tx.clone());
+    }
 
-    let mut draw_tick = time::interval(Duration::from_millis(DRAW_INTERVAL_MILLIS));
-    let mut refresh_tick = time::interval(Duration::from_secs(1));
     draw(&mut terminal, &mut app)?;
 
     loop {
@@ -243,20 +257,17 @@ async fn main() -> anyhow::Result<()> {
                 draw(&mut terminal, &mut app)?;
             }
             Some(event) = ui_rx.recv() => {
-                if handle_ui_event(event, &mut app) {
+                let should_draw = match event {
+                    UiEvent::RefreshDue => {
+                        refresh_history(&mut app, &api, room_id, &ui_tx);
+                        true
+                    }
+                    UiEvent::Resize => true,
+                    event => handle_ui_event(event, &mut app),
+                };
+                if should_draw {
                     draw(&mut terminal, &mut app)?;
                 }
-            }
-            _ = refresh_tick.tick() => {
-                if should_refresh_history(args.refresh_interval, &app) {
-                    app.refreshing = true;
-                    app.last_history_refresh = Some(Instant::now());
-                    spawn_history_task(api.clone(), room_id, ui_tx.clone());
-                    draw(&mut terminal, &mut app)?;
-                }
-            }
-            _ = draw_tick.tick() => {
-                draw(&mut terminal, &mut app)?;
             }
         }
     }
@@ -344,6 +355,23 @@ impl ApiClient {
         }
     }
 
+    async fn send_comment(&self, message: String) -> anyhow::Result<()> {
+        let response = self
+            .http
+            .post(self.service.api_url("/api/live/comment"))
+            .json(&json!({ "message": message }))
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("HTTP {status}: {}", body.trim())
+    }
+
     async fn history(&self, room_id: u64) -> anyhow::Result<HistoryResult> {
         let url = self.service.api_url(&format!(
             "/api/danmu/messages?room_id={room_id}&include_recent=1"
@@ -395,8 +423,10 @@ impl App {
             scroll: 0,
             status,
             status_kind: LineKind::System,
-            last_history_refresh: None,
             refreshing: false,
+            input: String::new(),
+            input_cursor: 0,
+            sending_comment: false,
         }
     }
 
@@ -435,9 +465,7 @@ impl App {
                 };
                 line.sequence = entry.received_seq;
                 line.sort_at = entry.sent_at.unwrap_or(line.sort_at);
-                if let Some(timeline) = entry.timeline.filter(|value| !value.is_empty()) {
-                    line.time = sanitize_text(&timeline);
-                }
+                line.time = format_time(line.sort_at);
                 self.add_line(line);
             }
         }
@@ -470,6 +498,69 @@ impl App {
         self.messages.drain(0..excess);
         self.seen = self.messages.iter().map(|line| line.id.clone()).collect();
     }
+
+    fn input_is_empty(&self) -> bool {
+        self.input.trim().is_empty()
+    }
+
+    fn insert_input_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.input.insert(self.input_cursor, ch);
+        self.input_cursor += ch.len_utf8();
+    }
+
+    fn backspace_input(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input.drain(index..self.input_cursor);
+            self.input_cursor = index;
+        }
+    }
+
+    fn delete_input(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let end = self.input[self.input_cursor..]
+            .chars()
+            .next()
+            .map(|ch| self.input_cursor + ch.len_utf8())
+            .unwrap_or(self.input.len());
+        self.input.drain(self.input_cursor..end);
+    }
+
+    fn move_input_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input_cursor = index;
+        }
+    }
+
+    fn move_input_right(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        self.input_cursor += self.input[self.input_cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or_default();
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    fn input_cursor_end(&mut self) {
+        self.input_cursor = self.input.len();
+    }
 }
 
 fn compare_lines(left: &DanmuLine, right: &DanmuLine) -> Ordering {
@@ -487,26 +578,68 @@ fn handle_input(
     ui_tx: &mpsc::Sender<UiEvent>,
 ) -> bool {
     match input {
-        Input::Quit => return true,
-        Input::Refresh => {
-            if app.refreshing {
-                app.set_status("正在刷新历史", LineKind::System);
+        Input::Enter => {
+            let message = app.input.trim().to_string();
+            if message.is_empty() {
+                app.set_status("请输入弹幕后按 Enter 发送", LineKind::System);
+            } else if app.sending_comment {
+                app.set_status("上一条弹幕正在发送", LineKind::System);
             } else {
-                app.refreshing = true;
-                app.last_history_refresh = Some(Instant::now());
-                app.set_status("正在刷新历史", LineKind::System);
-                spawn_history_task(api.clone(), room_id, ui_tx.clone());
+                app.clear_input();
+                app.sending_comment = true;
+                app.set_status("正在发送弹幕", LineKind::System);
+                spawn_comment_task(api.clone(), message, ui_tx.clone());
+            }
+        }
+        Input::Escape => app.clear_input(),
+        Input::Backspace => app.backspace_input(),
+        Input::Delete => app.delete_input(),
+        Input::ClearInput => app.clear_input(),
+        Input::CursorLeft => app.move_input_left(),
+        Input::CursorRight => app.move_input_right(),
+        Input::Home => {
+            if app.input_is_empty() {
+                app.scroll = usize::MAX;
+            } else {
+                app.input_cursor = 0;
+            }
+        }
+        Input::End => {
+            if app.input_is_empty() {
+                app.scroll = 0;
+            } else {
+                app.input_cursor_end();
             }
         }
         Input::Up => app.scroll = app.scroll.saturating_add(1),
         Input::Down => app.scroll = app.scroll.saturating_sub(1),
         Input::PageUp => app.scroll = app.scroll.saturating_add(10),
         Input::PageDown => app.scroll = app.scroll.saturating_sub(10),
-        Input::Top => app.scroll = usize::MAX,
-        Input::Bottom => app.scroll = 0,
+        Input::Char(ch) => match ch {
+            'q' | 'Q' if app.input_is_empty() => return true,
+            'r' | 'R' if app.input_is_empty() => refresh_history(app, api, room_id, ui_tx),
+            'k' | 'K' if app.input_is_empty() => app.scroll = app.scroll.saturating_add(1),
+            'j' | 'J' if app.input_is_empty() => app.scroll = app.scroll.saturating_sub(1),
+            'u' | 'U' if app.input_is_empty() => app.scroll = app.scroll.saturating_add(10),
+            'd' | 'D' if app.input_is_empty() => app.scroll = app.scroll.saturating_sub(10),
+            'g' if app.input_is_empty() => app.scroll = usize::MAX,
+            'G' if app.input_is_empty() => app.scroll = 0,
+            _ => app.insert_input_char(ch),
+        },
     }
 
     false
+}
+
+fn refresh_history(app: &mut App, api: &ApiClient, room_id: u64, ui_tx: &mpsc::Sender<UiEvent>) {
+    if app.refreshing {
+        app.set_status("正在刷新历史", LineKind::System);
+        return;
+    }
+
+    app.refreshing = true;
+    app.set_status("正在刷新历史", LineKind::System);
+    spawn_history_task(api.clone(), room_id, ui_tx.clone());
 }
 
 fn handle_ui_event(event: UiEvent, app: &mut App) -> bool {
@@ -539,11 +672,14 @@ fn handle_ui_event(event: UiEvent, app: &mut App) -> bool {
                 if let Some(mut line) = chat_line_from_payload(&payload, now) {
                     line.sequence = app.next_sequence();
                     app.add_line(line);
+                    true
                 } else if app.show_system {
                     let line = system_line_from_payload(&payload, now, app.next_sequence());
                     app.add_line(line);
+                    true
+                } else {
+                    false
                 }
-                false
             }
         },
         UiEvent::WsStatus(result) => match result {
@@ -566,16 +702,21 @@ fn handle_ui_event(event: UiEvent, app: &mut App) -> bool {
             }
             true
         }
+        UiEvent::Comment { message, result } => {
+            app.sending_comment = false;
+            match result {
+                Ok(()) => app.set_status("弹幕已发送，等待事件流回显", LineKind::System),
+                Err(error) => {
+                    app.input = message;
+                    app.input_cursor_end();
+                    app.set_status(format!("发送弹幕失败: {error}"), LineKind::Error);
+                }
+            }
+            true
+        }
+        UiEvent::RefreshDue => false,
+        UiEvent::Resize => true,
     }
-}
-
-fn should_refresh_history(refresh_interval: u64, app: &App) -> bool {
-    if refresh_interval == 0 || app.refreshing {
-        return false;
-    }
-    app.last_history_refresh
-        .map(|last| last.elapsed() >= Duration::from_secs(refresh_interval))
-        .unwrap_or(true)
 }
 
 fn spawn_ws_task(ws_url: String, ui_tx: mpsc::Sender<UiEvent>) {
@@ -631,6 +772,50 @@ fn spawn_history_task(api: ApiClient, room_id: u64, ui_tx: mpsc::Sender<UiEvent>
     });
 }
 
+fn spawn_comment_task(api: ApiClient, message: String, ui_tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let result = api
+            .send_comment(message.clone())
+            .await
+            .map_err(|error| error.to_string());
+        let _ = ui_tx.send(UiEvent::Comment { message, result }).await;
+    });
+}
+
+fn spawn_refresh_timer(refresh_interval: u64, ui_tx: mpsc::Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let mut tick = time::interval(Duration::from_secs(refresh_interval));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if ui_tx.send(UiEvent::RefreshDue).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_resize_task(ui_tx: mpsc::Sender<UiEvent>) {
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+        else {
+            return;
+        };
+        while signal.recv().await.is_some() {
+            if ui_tx.send(UiEvent::Resize).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    #[cfg(not(unix))]
+    {
+        let _ = ui_tx;
+    }
+}
+
 fn spawn_input_thread(input_tx: mpsc::Sender<Input>) {
     let (thread_tx, thread_rx) = std_mpsc::channel();
     thread::spawn(move || {
@@ -655,16 +840,13 @@ fn read_input(input_tx: std_mpsc::Sender<Input>) {
         }
 
         let input = match byte[0] {
-            b'q' | b'Q' => Some(Input::Quit),
-            b'r' | b'R' => Some(Input::Refresh),
-            b'k' | b'K' => Some(Input::Up),
-            b'j' | b'J' => Some(Input::Down),
-            b'u' | b'U' => Some(Input::PageUp),
-            b'd' | b'D' => Some(Input::PageDown),
-            b'g' => Some(Input::Top),
-            b'G' => Some(Input::Bottom),
+            b'\r' | b'\n' => Some(Input::Enter),
+            0x7f | 0x08 => Some(Input::Backspace),
+            0x04 => Some(Input::Delete),
+            0x15 => Some(Input::ClearInput),
             0x1b => read_escape_input(&mut stdin),
-            _ => None,
+            value if value.is_ascii() => Some(Input::Char(value as char)),
+            value => read_utf8_char(value, &mut stdin).map(Input::Char),
         };
 
         if let Some(input) = input {
@@ -676,25 +858,66 @@ fn read_input(input_tx: std_mpsc::Sender<Input>) {
 }
 
 fn read_escape_input(stdin: &mut io::Stdin) -> Option<Input> {
-    let mut sequence = [0u8; 2];
-    stdin.read_exact(&mut sequence).ok()?;
-    match sequence {
-        [b'[', b'A'] => Some(Input::Up),
-        [b'[', b'B'] => Some(Input::Down),
-        [b'[', b'H'] => Some(Input::Top),
-        [b'[', b'F'] => Some(Input::Bottom),
-        [b'[', b'5'] => {
-            let mut tail = [0u8; 1];
-            let _ = stdin.read_exact(&mut tail);
-            Some(Input::PageUp)
-        }
-        [b'[', b'6'] => {
-            let mut tail = [0u8; 1];
-            let _ = stdin.read_exact(&mut tail);
-            Some(Input::PageDown)
-        }
+    let Some(first) = read_byte_timeout(stdin, ESCAPE_SEQUENCE_TIMEOUT_MILLIS) else {
+        return Some(Input::Escape);
+    };
+    if first != b'[' && first != b'O' {
+        return None;
+    }
+
+    let second = read_byte_timeout(stdin, ESCAPE_SEQUENCE_TIMEOUT_MILLIS)?;
+    match (first, second) {
+        (b'[', b'A') => Some(Input::Up),
+        (b'[', b'B') => Some(Input::Down),
+        (b'[', b'C') => Some(Input::CursorRight),
+        (b'[', b'D') => Some(Input::CursorLeft),
+        (b'[', b'H') | (b'O', b'H') => Some(Input::Home),
+        (b'[', b'F') | (b'O', b'F') => Some(Input::End),
+        (b'[', b'1') | (b'[', b'7') => read_tilde_key(stdin, Input::Home),
+        (b'[', b'4') | (b'[', b'8') => read_tilde_key(stdin, Input::End),
+        (b'[', b'3') => read_tilde_key(stdin, Input::Delete),
+        (b'[', b'5') => read_tilde_key(stdin, Input::PageUp),
+        (b'[', b'6') => read_tilde_key(stdin, Input::PageDown),
         _ => None,
     }
+}
+
+fn read_tilde_key(stdin: &mut io::Stdin, input: Input) -> Option<Input> {
+    match read_byte_timeout(stdin, ESCAPE_SEQUENCE_TIMEOUT_MILLIS) {
+        Some(b'~') | None => Some(input),
+        Some(_) => None,
+    }
+}
+
+fn read_byte_timeout(stdin: &mut io::Stdin, timeout_millis: i32) -> Option<u8> {
+    let mut pollfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_millis) };
+    if ready <= 0 || pollfd.revents & libc::POLLIN == 0 {
+        return None;
+    }
+
+    let mut byte = [0u8; 1];
+    stdin.read_exact(&mut byte).ok()?;
+    Some(byte[0])
+}
+
+fn read_utf8_char(first: u8, stdin: &mut io::Stdin) -> Option<char> {
+    let width = match first {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    let mut buffer = [0u8; 4];
+    buffer[0] = first;
+    for slot in buffer.iter_mut().take(width).skip(1) {
+        *slot = read_byte_timeout(stdin, ESCAPE_SEQUENCE_TIMEOUT_MILLIS)?;
+    }
+    std::str::from_utf8(&buffer[..width]).ok()?.chars().next()
 }
 
 fn chat_line_from_payload(payload: &str, received_at: u64) -> Option<DanmuLine> {
@@ -1008,12 +1231,13 @@ fn draw(terminal: &mut Terminal, app: &mut App) -> io::Result<()> {
     let (cols, rows) = terminal.size();
     let width = cols.max(40) as usize;
     let height = rows.max(8) as usize;
-    let body_height = height.saturating_sub(4);
+    let body_height = height.saturating_sub(5);
     let rendered = render_lines(app, width.saturating_sub(1));
     let max_scroll = rendered.len().saturating_sub(body_height);
     app.scroll = app.scroll.min(max_scroll);
     let start = rendered.len().saturating_sub(body_height + app.scroll);
     let end = (start + body_height).min(rendered.len());
+    let (input, input_cursor) = input_text(app, width);
 
     terminal.write("\x1b[?25l\x1b[H")?;
     terminal.clear_line()?;
@@ -1054,6 +1278,13 @@ fn draw(terminal: &mut Terminal, app: &mut App) -> io::Result<()> {
     terminal.write("\r\n")?;
     terminal.clear_line()?;
     terminal.write_styled(&footer_text(app, max_scroll, width), LineKind::System)?;
+    terminal.write("\r\n")?;
+    terminal.clear_line()?;
+    terminal.write(&input)?;
+    terminal.write(&format!(
+        "\x1b[{height};{}H\x1b[?25h",
+        input_cursor.saturating_add(1)
+    ))?;
     terminal.flush()
 }
 
@@ -1090,13 +1321,51 @@ fn footer_text(app: &App, max_scroll: usize, width: usize) -> String {
     } else {
         ""
     };
+    let sending = if app.sending_comment {
+        " | 正在发送"
+    } else {
+        ""
+    };
     truncate_to_width(
         &format!(
-            "q 退出  r 刷新  k/j 滚动  u/d 翻页  g/G 首尾 | 弹幕 {}  系统 {}  滚动 {}/{}{}",
-            app.chat_count, app.system_count, app.scroll, max_scroll, refreshing
+            "空输入时 q 退出 r 刷新 k/j 滚动 u/d 翻页 g/G 首尾 | 弹幕 {} 系统 {} 滚动 {}/{}{}{}",
+            app.chat_count, app.system_count, app.scroll, max_scroll, refreshing, sending
         ),
         width.saturating_sub(1),
     )
+}
+
+fn input_text(app: &App, width: usize) -> (String, usize) {
+    let prefix = "弹幕> ";
+    let line_width = width.saturating_sub(1);
+    let prefix_width = display_width(prefix).min(line_width);
+    let content_width = line_width.saturating_sub(prefix_width);
+    let start = input_start_for_cursor(&app.input, app.input_cursor, content_width);
+    let visible = truncate_to_width(&app.input[start..], content_width);
+    let cursor_offset = display_width(&app.input[start..app.input_cursor]).min(content_width);
+    let cursor_col = prefix_width.saturating_add(cursor_offset).min(line_width);
+
+    let mut line = truncate_to_width(prefix, prefix_width);
+    line.push_str(&visible);
+    (line, cursor_col)
+}
+
+fn input_start_for_cursor(input: &str, cursor: usize, width: usize) -> usize {
+    if width == 0 || display_width(&input[..cursor]) <= width {
+        return 0;
+    }
+
+    let mut used = 0usize;
+    let mut start = cursor;
+    for (index, ch) in input[..cursor].char_indices().rev() {
+        let ch_width = char_width(ch);
+        if used + ch_width > width {
+            break;
+        }
+        used += ch_width;
+        start = index;
+    }
+    start
 }
 
 fn render_lines(app: &App, width: usize) -> Vec<RenderLine> {
@@ -1234,12 +1503,17 @@ fn format_time(millis: u64) -> String {
         } else {
             let tm = tm.assume_init();
             Some(format!(
-                "{:02}:{:02}:{:02}",
-                tm.tm_hour, tm.tm_min, tm.tm_sec
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min,
+                tm.tm_sec
             ))
         }
     };
-    formatted.unwrap_or_else(|| "--:--:--".to_string())
+    formatted.unwrap_or_else(|| "0000-00-00 00:00:00".to_string())
 }
 
 struct Terminal {
@@ -1355,6 +1629,46 @@ mod tests {
     }
 
     #[test]
+    fn history_time_uses_standard_local_format() {
+        let mut app = App::new(
+            &Cli {
+                url: DEFAULT_URL.to_string(),
+                room_id: None,
+                max_messages: DEFAULT_MAX_MESSAGES,
+                refresh_interval: 0,
+                no_connect: true,
+                no_history: true,
+                show_system: false,
+            },
+            ServiceUrl::new(DEFAULT_URL),
+            1,
+            PublicConfig {
+                room_id: 1,
+                room_title: "room".to_string(),
+                username: None,
+                room_token_available: true,
+            },
+        );
+        app.add_history(HistoryResult {
+            items: vec![DanmuHistoryEntry {
+                id: "danmu:42:你好:1780000000".to_string(),
+                payload:
+                    r#"{"cmd":"DANMU_MSG","info":[[0,1,25,0,1780000000],"你好",[42,"Jamie"],[]]}"#
+                        .to_string(),
+                received_at: 1,
+                received_seq: 0,
+                sent_at: Some(1_780_000_000_000),
+            }],
+            recent_loaded: 1,
+            recent_error: None,
+        });
+
+        assert_eq!(app.messages[0].time.len(), 19);
+        assert!(app.messages[0].time.chars().all(|ch| ch.is_ascii()));
+        assert_ne!(app.messages[0].time, "2026-04-30 12:00:00");
+    }
+
+    #[test]
     fn parses_super_chat_message() {
         let line = chat_line_from_payload(
             r#"{"cmd":"SUPER_CHAT_MESSAGE","data":{"id":1,"uid":42,"message":"SC 内容","price":30,"user_info":{"uname":"Jamie"},"ts":1780000000}}"#,
@@ -1373,5 +1687,83 @@ mod tests {
         let lines = wrap_with_prefix("[00] A: ", "你好世界", "        ", 12);
 
         assert_eq!(lines, vec!["[00] A: 你好", "        世界"]);
+    }
+
+    #[test]
+    fn scrollback_order_keeps_latest_at_bottom() {
+        let mut app = App::new(
+            &Cli {
+                url: DEFAULT_URL.to_string(),
+                room_id: None,
+                max_messages: DEFAULT_MAX_MESSAGES,
+                refresh_interval: 0,
+                no_connect: true,
+                no_history: true,
+                show_system: false,
+            },
+            ServiceUrl::new(DEFAULT_URL),
+            1,
+            PublicConfig {
+                room_id: 1,
+                room_title: "room".to_string(),
+                username: None,
+                room_token_available: true,
+            },
+        );
+        app.add_line(DanmuLine {
+            id: "late".to_string(),
+            sort_at: 2,
+            sequence: 0,
+            time: format_time(2),
+            name: "u".to_string(),
+            content: "late".to_string(),
+            medal: None,
+            price: None,
+            kind: LineKind::Chat,
+        });
+        app.add_line(DanmuLine {
+            id: "early".to_string(),
+            sort_at: 1,
+            sequence: 1,
+            time: format_time(1),
+            name: "u".to_string(),
+            content: "early".to_string(),
+            medal: None,
+            price: None,
+            kind: LineKind::Chat,
+        });
+
+        let rendered = render_lines(&app, 120);
+        assert!(rendered.first().unwrap().text.ends_with("early"));
+        assert!(rendered.last().unwrap().text.ends_with("late"));
+    }
+
+    #[test]
+    fn input_view_tracks_cursor_with_cjk_text() {
+        let mut app = App::new(
+            &Cli {
+                url: DEFAULT_URL.to_string(),
+                room_id: None,
+                max_messages: DEFAULT_MAX_MESSAGES,
+                refresh_interval: 0,
+                no_connect: true,
+                no_history: true,
+                show_system: false,
+            },
+            ServiceUrl::new(DEFAULT_URL),
+            1,
+            PublicConfig {
+                room_id: 1,
+                room_title: "room".to_string(),
+                username: None,
+                room_token_available: true,
+            },
+        );
+        app.input = "你好 bilive".to_string();
+        app.input_cursor = "你好".len();
+
+        let (line, cursor) = input_text(&app, 80);
+        assert_eq!(line, "弹幕> 你好 bilive");
+        assert_eq!(cursor, display_width("弹幕> 你好"));
     }
 }

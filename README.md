@@ -22,7 +22,9 @@ The project has three main pieces:
 - Danmu connect/disconnect, WebSocket event streaming, and comment sending.
 - Room admin, user silent, global silent, blocked word, user search, and online
   rank management APIs.
-- Static UI tabs for account, stream, danmu, and manager workflows.
+- Optional VTuber control tab that saves EasyVtuber launch settings and
+  starts/stops the external runtime from the web UI.
+- Static UI tabs for account, stream, danmu, VTuber, and manager workflows.
 
 ## Layout
 
@@ -90,6 +92,42 @@ The TUI subscribes to `/api/events`, refreshes recent danmu through
 `/api/danmu/messages`, and requests `/api/danmu/connect` on startup unless
 `--no-connect` is passed. Use `r` to refresh history, `k`/`j` or arrow keys to
 scroll, `u`/`d` to page, `g`/`G` for top/bottom, and `q` to quit.
+
+## VTuber Setup
+
+VTuber support is optional and disabled by default. If you never open the
+VTuber tab or start the runtime, bilive runs normally without Python,
+EasyVtuber, GPU drivers, model files, Spout2, or OBS virtual camera support.
+
+Prepare an EasyVtuber runtime first. It must be runnable without the
+EasyVtuber wxPython launcher, because bilive starts the core process directly:
+
+```bash
+python -m src.main
+```
+
+In the web UI, open the `VTuber` tab and configure:
+
+- `运行目录`: the EasyVtuber project or unpacked runtime directory containing
+  `src/main.py`, for example `/home/jamie/proj/EasyVtuber`.
+- `Python`: the interpreter for that environment, for example `python`,
+  `python.exe`, or a full conda/env path.
+- `角色名`: a PNG name under EasyVtuber `data/images/`, without `.png`.
+- `输入`: `鼠标/音频`, `iFacialMocap`, `OpenSeeFace`, `摄像头`, or `调试输入`.
+- `输入地址`: required for iFacialMocap or OpenSeeFace, such as
+  `192.168.1.10:49983` or `127.0.0.1:11573`.
+- `输出`: choose `Spout2`, `OBS 虚拟摄像头`, or `调试窗口`.
+- Model, FPS, cache, interpolation, super-resolution, TensorRT, and extra args
+  should match the same values you would pass to EasyVtuber.
+
+Click `保存设置` to persist the TOML config. Click `启动形象` only when the
+EasyVtuber environment is ready. Click `停止形象` to terminate the external
+process started by bilive.
+
+The backend intentionally does not rewrite EasyVtuber in Rust. bilive owns the
+control plane: config, status, start, and stop. The Python/GPU inference
+runtime remains external because it depends on PyTorch, ONNX Runtime, DirectML,
+TensorRT, OpenCV, Mediapipe, Spout/virtual camera output, and model artifacts.
 
 ## Configuration
 

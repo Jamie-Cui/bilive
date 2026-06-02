@@ -64,6 +64,7 @@ pub struct LoginStatus {
 #[derive(Debug, Serialize)]
 pub struct BootstrapResponse {
     pub config: AppConfig,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -156,30 +157,81 @@ impl BiliClient {
 
     pub async fn bootstrap(&self) -> BiliResult<BootstrapResponse> {
         let user = self.user_info().await?;
-        let room = self.room_id_by_uid(user.mid).await?;
-        let areas = self.area_list().await?;
-
         let img_key = extract_key(&user.wbi_img.img_url);
         let sub_key = extract_key(&user.wbi_img.sub_url);
-        let danmu = self
-            .danmu_info_with_keys(room.room_id, &img_key, &sub_key)
+        let previous = self.config.get().await;
+        let account_changed = previous.uid != 0 && previous.uid != user.mid;
+
+        let user_mid = user.mid;
+        let username = user.uname;
+        let avatar = user.face;
+        let config_img_key = img_key.clone();
+        let config_sub_key = sub_key.clone();
+
+        self.config
+            .update(|config| {
+                config.uid = user_mid;
+                config.username = Some(username);
+                config.avatar = Some(avatar);
+                config.img_url = config_img_key;
+                config.sub_url = config_sub_key;
+                if account_changed {
+                    config.room_id = 0;
+                    config.room_token.clear();
+                    config.streams.clear();
+                    config.is_open_live = false;
+                }
+            })
             .await?;
+
+        let mut warnings = Vec::new();
+        let room_id = match self.room_id_by_uid(user_mid).await {
+            Ok(room) => Some(room.room_id),
+            Err(error) => {
+                warnings.push(format!("failed to resolve live room: {error}"));
+                if account_changed || previous.room_id == 0 {
+                    None
+                } else {
+                    Some(previous.room_id)
+                }
+            }
+        };
+        let areas = match self.area_list().await {
+            Ok(areas) => Some(areas),
+            Err(error) => {
+                warnings.push(format!("failed to load live areas: {error}"));
+                None
+            }
+        };
+        let room_token = match room_id {
+            Some(room_id) => match self.danmu_info_with_keys(room_id, &img_key, &sub_key).await {
+                Ok(danmu) => Some(danmu.token),
+                Err(error) => {
+                    warnings.push(format!("failed to refresh danmu token: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
 
         let config = self
             .config
             .update(|config| {
-                config.uid = user.mid;
-                config.username = Some(user.uname);
-                config.avatar = Some(user.face);
-                config.img_url = img_key;
-                config.sub_url = sub_key;
-                config.room_id = room.room_id;
-                config.area_list = areas;
-                config.room_token = danmu.token;
+                if let Some(room_id) = room_id {
+                    config.room_id = room_id;
+                }
+                if let Some(areas) = areas {
+                    config.area_list = areas;
+                }
+                if let Some(room_token) = room_token {
+                    config.room_token = room_token;
+                } else if account_changed || room_id.is_none() {
+                    config.room_token.clear();
+                }
             })
             .await?;
 
-        Ok(BootstrapResponse { config })
+        Ok(BootstrapResponse { config, warnings })
     }
 
     pub async fn qrcode_generate(&self) -> BiliResult<QrCode> {

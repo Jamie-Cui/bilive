@@ -875,7 +875,10 @@ async fn auth_status(State(state): State<AppState>) -> Json<Value> {
 
 async fn auth_bootstrap(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let result = state.bili.bootstrap().await?;
-    Ok(Json(json!({ "config": public_config(result.config) })))
+    Ok(Json(json!({
+        "config": public_config(result.config),
+        "warnings": result.warnings,
+    })))
 }
 
 async fn auth_cookie(
@@ -883,7 +886,10 @@ async fn auth_cookie(
     Json(request): Json<CookieLoginRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let result = state.bili.set_cookie_login(&request.cookie).await?;
-    Ok(Json(json!({ "config": public_config(result.config) })))
+    Ok(Json(json!({
+        "config": public_config(result.config),
+        "warnings": result.warnings,
+    })))
 }
 
 async fn auth_logout(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -962,13 +968,18 @@ async fn update_area(
 }
 
 async fn start_live(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = state.bili.config().await;
+    if config.room_id == 0 {
+        return Err(ApiError::bad_request(
+            "当前账号没有直播间，无法开播。请使用已开通直播间的账号登录。",
+        ));
+    }
+
     let mut response = state.bili.start_live().await?;
     if response.get("code").and_then(Value::as_i64) == Some(0) {
-        let room_id = state.bili.config().await.room_id;
-        state.danmu_log.lock().await.reset_for_room(room_id);
+        state.danmu_log.lock().await.reset_for_room(config.room_id);
     }
     if requires_face_auth(&response) {
-        let config = state.bili.config().await;
         if config.uid != 0 {
             let url = face_auth_url(config.uid);
             let svg = render_qr_svg(&url)?;

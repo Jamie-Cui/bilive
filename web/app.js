@@ -272,7 +272,9 @@ async function bootstrap() {
   state.config = result.config;
   state.authenticated = true;
   renderConfig();
-  toast("初始化完成");
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  toast(warnings.length ? "账号已刷新，直播间信息未完整初始化" : "初始化完成", warnings.length > 0);
+  return result;
 }
 
 async function cookieLogin() {
@@ -283,7 +285,8 @@ async function cookieLogin() {
   state.config = result.config;
   els.cookieInput.value = "";
   renderConfig();
-  toast("登录成功");
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  toast(warnings.length ? "登录成功，直播间信息未完整初始化" : "登录成功", warnings.length > 0);
 }
 
 async function logout() {
@@ -311,7 +314,15 @@ async function pollQr(qrcodeKey) {
     case 0:
       stopQrPolling();
       els.qrStatus.textContent = "已确认，正在初始化";
-      await bootstrap();
+      try {
+        const result = await bootstrap();
+        const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+        els.qrStatus.textContent = warnings.length ? "账号已刷新，直播间信息未完整初始化" : "初始化完成";
+      } catch (error) {
+        await refreshAll();
+        els.qrStatus.textContent = "初始化失败，已刷新账号状态";
+        toast(error.message, true);
+      }
       break;
     case 86038:
       stopQrPolling();
@@ -343,6 +354,10 @@ async function saveArea() {
 }
 
 async function startLive() {
+  if (Number(state.config?.room_id || 0) <= 0) {
+    toast("当前账号没有直播间，无法开播。请使用已开通直播间的账号登录。", true);
+    return;
+  }
   await patchConfig({ room_title: els.roomTitle.value, category_id: els.categoryId.value, area_id: els.areaId.value });
   const result = await api("/api/live/start", { method: "POST" });
   showLiveConsoleResult(result);
@@ -498,6 +513,7 @@ function renderConfig() {
   els.roomTitle.value = config.room_title || "";
   els.roomId.value = config.room_id || "";
   els.uid.value = config.uid || "";
+  els.startLive.disabled = !state.authenticated || Number(config.room_id || 0) <= 0;
   applyTheme(config.theme || "dark");
   renderNotificationSettings(config.danmu_notifications || {});
   renderCategoryOptions();

@@ -7,7 +7,8 @@ browser admin UI from `web/`.
 The project has three main pieces:
 
 - A Rust CLI and service backend.
-- A terminal danmu viewer that connects to the local service.
+- A deprecated terminal danmu viewer retained for compatibility; use the web
+  UI comments tab for danmu workflows.
 - An embedded, plain HTML/CSS/JavaScript admin UI with no frontend build step.
 - A Linux systemd service template kept separate from the service
   implementation.
@@ -33,7 +34,7 @@ crates/
   bilive-cli/       # bilive start/stop/status/restart and foreground serve
   bilive-core/      # Bilibili API client, signing, state, danmu, events
   bilive-server/    # axum HTTP/WebSocket routes and static file serving
-  bilive-danmu/     # terminal danmu viewer for a running bilive service
+  bilive-danmu/     # deprecated terminal danmu viewer kept for compatibility
 web/                # No-build static admin UI
 packaging/          # systemd service unit template
 ```
@@ -80,9 +81,13 @@ or `--log-file` values to `status`, `restart`, and `stop`. If you use a
 non-default listen address, pass the same `--listen` value to `status` for the
 health check.
 
-## TUI Usage
+## Deprecated TUI
 
-Run the service first, then open the terminal danmu viewer:
+`bilive-danmu` is deprecated. Use the web UI comments tab served by `bilive`
+for danmu viewing, history, connection control, and comment sending.
+
+The old terminal viewer remains available for compatibility. Run the service
+first, then start it explicitly:
 
 ```bash
 cargo run -p bilive-danmu -- --url http://127.0.0.1:22333

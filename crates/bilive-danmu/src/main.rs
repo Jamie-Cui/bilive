@@ -30,7 +30,7 @@ const ESCAPE_SEQUENCE_TIMEOUT_MILLIS: i32 = 25;
 #[command(
     name = "bilive-danmu",
     version,
-    about = "Terminal danmu viewer for a running bilive service"
+    about = "Deprecated terminal danmu viewer for a running bilive service. Use the web UI comments tab instead."
 )]
 struct Cli {
     /// Base URL for the local bilive service.
@@ -195,6 +195,9 @@ struct App {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
+    eprintln!(
+        "warning: bilive-danmu is deprecated; use the web UI comments tab at the bilive service URL instead."
+    );
     if args.max_messages == 0 {
         bail!("--max-messages must be greater than 0");
     }

@@ -15,8 +15,8 @@ This repository is a Rust workspace with an embedded, no-build static web UI.
 - `crates/bilive-server/`: axum HTTP/WebSocket service, API routes, QR SVG
   rendering, embedded/static file serving, danmu history, notifications, and
   stream testing.
-- `crates/bilive-danmu/`: terminal UI that connects to the local server event
-  WebSocket and danmu history APIs.
+- `crates/bilive-danmu/`: deprecated compatibility terminal UI; prefer the web
+  UI comments tab for danmu viewing, history, connection control, and sending.
 - `crates/bilive-core/`: Bilibili HTTP client, WBI/app signing, config storage,
   stream credential parsing, danmu client/protocol, and shared event types.
 - `web/`: plain `index.html`, `styles.css`, `app.js`, and `favicon.svg`; no
@@ -38,8 +38,8 @@ or crate-local `tests/`.
   the local service and serve UI files from the working tree.
 - `cargo run -p bilive -- start --listen 127.0.0.1:22333 --web-dir web`: start
   the local service in the background.
-- `cargo run -p bilive-danmu -- --url http://127.0.0.1:22333`: view live danmu in
-  a terminal after the local service is running.
+- `cargo run -p bilive-danmu -- --url http://127.0.0.1:22333`: deprecated
+  compatibility terminal viewer; prefer the web UI comments tab.
 - `cargo run -p bilive -- status` / `cargo run -p bilive -- stop`: inspect or
   stop the background service.
 - `cargo build --release -p bilive`: build the release binary with embedded UI

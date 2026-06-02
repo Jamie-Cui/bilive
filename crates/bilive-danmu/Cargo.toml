@@ -5,11 +5,15 @@
 [package]
 name = "bilive-danmu"
 version = "0.1.0"
-description = "Terminal danmu viewer for bilive"
+description = "Deprecated terminal danmu viewer for bilive"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[package.metadata]
+deprecated = true
+deprecation-note = "Use the web UI comments tab served by bilive instead."
 
 [[bin]]
 name = "bilive-danmu"

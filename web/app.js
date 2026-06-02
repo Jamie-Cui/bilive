@@ -13,9 +13,12 @@ const state = {
   chatSort: "desc",
   nextDanmuSeq: 0,
   eventCount: 0,
+  eventsConnectedOnce: false,
   qrPollTimer: null,
   streamCredentialsVisible: false,
 };
+
+const COMMENT_MAX_LENGTH = 50;
 
 const $ = (selector) => document.querySelector(selector);
 const els = {
@@ -67,6 +70,7 @@ const els = {
   notifyExpireTimeout: $("#notify-expire-timeout"),
   saveNotifications: $("#save-notifications"),
   commentMessage: $("#comment-message"),
+  commentCounter: $("#comment-counter"),
   sendComment: $("#send-comment"),
   sortDanmu: $("#sort-danmu"),
   loadDanmuHistory: $("#load-danmu-history"),
@@ -131,6 +135,7 @@ document.body.append(overlay);
 
 bindUi();
 updateDanmuSortButton();
+renderCommentCounter();
 connectEvents();
 void refreshAll();
 
@@ -175,9 +180,10 @@ function bindUi() {
   els.disconnectDanmu.addEventListener("click", () => void withLoading(els.disconnectDanmu, disconnectDanmu));
   els.refreshDanmuToken.addEventListener("click", () => void withLoading(els.refreshDanmuToken, refreshDanmuToken));
   els.saveNotifications.addEventListener("click", () => void withLoading(els.saveNotifications, saveNotifications));
-  els.sendComment.addEventListener("click", () => void sendComment());
+  els.sendComment.addEventListener("click", () => void withLoading(els.sendComment, sendComment));
+  els.commentMessage.addEventListener("input", renderCommentCounter);
   els.commentMessage.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") { event.preventDefault(); void sendComment(); }
+    if (event.key === "Enter") { event.preventDefault(); void withLoading(els.sendComment, sendComment); }
   });
   els.sortDanmu.addEventListener("click", toggleDanmuSort);
   els.loadDanmuHistory.addEventListener("click", () => void withLoading(els.loadDanmuHistory, loadDanmuHistory));
@@ -236,7 +242,7 @@ function switchTab(tab) {
   });
   els.pageTitle.textContent = ({ account: "账号", stream: "直播", comments: "弹幕", vtuber: "VTuber", manager: "管理" })[tab] || "bilive";
   if (tab === "comments" && !state.chatLoaded) {
-    void loadDanmuHistory();
+    void loadDanmuHistory().catch((error) => toast(error.message, true));
   }
   if (tab === "vtuber") {
     void refreshVtuber();
@@ -399,21 +405,42 @@ async function disconnectDanmu() {
 async function sendComment() {
   const message = els.commentMessage.value.trim();
   if (!message) return;
+  const length = commentLength(message);
+  if (length > COMMENT_MAX_LENGTH) {
+    renderCommentCounter();
+    els.commentMessage.focus();
+    throw new Error(`弹幕过长：${length}/${COMMENT_MAX_LENGTH} 字，请拆成多条发送`);
+  }
   await api("/api/live/comment", { method: "POST", body: { message } });
   els.commentMessage.value = "";
+  renderCommentCounter();
   toast("弹幕已发送");
 }
 
-async function loadDanmuHistory() {
+function renderCommentCounter() {
+  const length = commentLength(els.commentMessage.value.trim());
+  els.commentCounter.textContent = `${length}/${COMMENT_MAX_LENGTH}`;
+  els.commentCounter.classList.toggle("over-limit", length > COMMENT_MAX_LENGTH);
+}
+
+function commentLength(value) {
+  return Array.from(String(value || "")).length;
+}
+
+async function loadDanmuHistory(options = {}) {
   const roomId = Number(els.roomId.value || state.config?.room_id || 0);
   const result = await api(`/api/danmu/messages?room_id=${encodeURIComponent(roomId)}`);
   renderDanmuMessages(result.items || []);
   state.chatLoaded = true;
+  if (options.silent) {
+    return result;
+  }
   if (result.recent_error) {
     toast(`已加载本地弹幕，最近历史补全失败: ${result.recent_error}`, true);
   } else {
     toast(`已加载 ${result.total || 0} 条本场弹幕`);
   }
+  return result;
 }
 
 async function loadRank() {
@@ -722,7 +749,13 @@ function connectEvents() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${window.location.host}/api/events`);
 
-  socket.addEventListener("open", () => {});
+  socket.addEventListener("open", () => {
+    const reconnecting = state.eventsConnectedOnce;
+    state.eventsConnectedOnce = true;
+    if (reconnecting && (state.chatLoaded || state.chatCount > 0)) {
+      void loadDanmuHistory({ silent: true }).catch((error) => toast(error.message, true));
+    }
+  });
   socket.addEventListener("close", () => {
     window.setTimeout(connectEvents, 1500);
   });

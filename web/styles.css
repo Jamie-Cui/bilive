@@ -919,6 +919,20 @@ input:focus, select:focus, textarea:focus {
   min-width: 0;
 }
 
+.comment-counter {
+  align-self: center;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-width: 44px;
+  text-align: right;
+}
+
+.comment-counter.over-limit {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;

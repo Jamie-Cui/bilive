@@ -100,6 +100,8 @@ struct DanmuHistoryEntry {
     received_at: u64,
     received_seq: u64,
     sent_at: Option<u64>,
+    #[serde(default)]
+    timeline: Option<String>,
 }
 
 #[derive(Debug)]
@@ -467,8 +469,20 @@ impl App {
                     entry.id
                 };
                 line.sequence = entry.received_seq;
-                line.sort_at = entry.sent_at.unwrap_or(line.sort_at);
-                line.time = format_time(line.sort_at);
+                if line.sort_at == entry.received_at {
+                    line.sort_at = entry.sent_at.unwrap_or(line.sort_at);
+                }
+                if let Some(timeline) = entry
+                    .timeline
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    line.sort_at = timeline_sort_at(timeline, line.sort_at).unwrap_or(line.sort_at);
+                    line.time = sanitize_text(timeline);
+                } else {
+                    line.time = format_time(line.sort_at);
+                }
                 self.add_line(line);
             }
         }
@@ -918,7 +932,7 @@ fn read_utf8_char(first: u8, stdin: &mut io::Stdin) -> Option<char> {
     let mut buffer = [0u8; 4];
     buffer[0] = first;
     for slot in buffer.iter_mut().take(width).skip(1) {
-        *slot = read_byte_timeout(stdin, ESCAPE_SEQUENCE_TIMEOUT_MILLIS)?;
+        stdin.read_exact(std::slice::from_mut(slot)).ok()?;
     }
     std::str::from_utf8(&buffer[..width]).ok()?.chars().next()
 }
@@ -1498,25 +1512,110 @@ fn now_millis() -> u64 {
 }
 
 fn format_time(millis: u64) -> String {
+    let formatted = local_tm(millis).map(|tm| {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    });
+    formatted.unwrap_or_else(|| "0000-00-00 00:00:00".to_string())
+}
+
+fn local_tm(millis: u64) -> Option<libc::tm> {
     let seconds = (millis / 1000) as libc::time_t;
     let mut tm = mem::MaybeUninit::<libc::tm>::uninit();
-    let formatted = unsafe {
+    unsafe {
         if libc::localtime_r(&seconds, tm.as_mut_ptr()).is_null() {
             None
         } else {
-            let tm = tm.assume_init();
-            Some(format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                tm.tm_year + 1900,
-                tm.tm_mon + 1,
-                tm.tm_mday,
-                tm.tm_hour,
-                tm.tm_min,
-                tm.tm_sec
-            ))
+            Some(tm.assume_init())
         }
-    };
-    formatted.unwrap_or_else(|| "0000-00-00 00:00:00".to_string())
+    }
+}
+
+fn timeline_sort_at(timeline: &str, fallback_millis: u64) -> Option<u64> {
+    let trimmed = timeline.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(separator) = trimmed.find(|ch| ch == ' ' || ch == 'T') {
+        let (date, time) = trimmed.split_at(separator);
+        let time = time.get(1..)?;
+        let (year, month, day) = parse_date(date)?;
+        let (hour, minute, second) = parse_time(time)?;
+        return local_datetime_millis(year, month, day, hour, minute, second);
+    }
+
+    let (hour, minute, second) = parse_time(trimmed)?;
+    let tm = local_tm(fallback_millis)?;
+    local_datetime_millis(
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        hour,
+        minute,
+        second,
+    )
+}
+
+fn parse_date(value: &str) -> Option<(i32, i32, i32)> {
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<i32>().ok()?;
+    let day = parts.next()?.parse::<i32>().ok()?;
+    if parts.next().is_some()
+        || year < 1970
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+    {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn parse_time(value: &str) -> Option<(i32, i32, i32)> {
+    let mut parts = value.split(':');
+    let hour = parts.next()?.parse::<i32>().ok()?;
+    let minute = parts.next()?.parse::<i32>().ok()?;
+    let second = parts
+        .next()
+        .map(|value| value.parse::<i32>().ok())
+        .unwrap_or(Some(0))?;
+    if parts.next().is_some()
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
+fn local_datetime_millis(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+) -> Option<u64> {
+    let mut tm = unsafe { mem::zeroed::<libc::tm>() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    tm.tm_isdst = -1;
+
+    let seconds = unsafe { libc::mktime(&mut tm) };
+    u64::try_from(seconds).ok()?.checked_mul(1000)
 }
 
 struct Terminal {
@@ -1533,8 +1632,18 @@ impl Terminal {
         }
         let original = unsafe { original.assume_init() };
         let mut raw = original;
-        raw.c_lflag &= !(libc::ECHO | libc::ICANON);
-        raw.c_iflag &= !(libc::IXON | libc::ICRNL);
+        raw.c_iflag &= !(libc::IGNBRK
+            | libc::BRKINT
+            | libc::PARMRK
+            | libc::ISTRIP
+            | libc::INLCR
+            | libc::IGNCR
+            | libc::ICRNL
+            | libc::IXON);
+        raw.c_oflag &= !libc::OPOST;
+        raw.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::IEXTEN);
+        raw.c_cflag &= !(libc::CSIZE | libc::PARENB);
+        raw.c_cflag |= libc::CS8;
         raw.c_cc[libc::VMIN] = 1;
         raw.c_cc[libc::VTIME] = 0;
         let result = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) };
@@ -1661,6 +1770,7 @@ mod tests {
                 received_at: 1,
                 received_seq: 0,
                 sent_at: Some(1_780_000_000_000),
+                timeline: None,
             }],
             recent_loaded: 1,
             recent_error: None,
@@ -1669,6 +1779,58 @@ mod tests {
         assert_eq!(app.messages[0].time.len(), 19);
         assert!(app.messages[0].time.chars().all(|ch| ch.is_ascii()));
         assert_ne!(app.messages[0].time, "2026-04-30 12:00:00");
+    }
+
+    #[test]
+    fn history_timeline_controls_display_and_sort_order() {
+        let mut app = App::new(
+            &Cli {
+                url: DEFAULT_URL.to_string(),
+                room_id: None,
+                max_messages: DEFAULT_MAX_MESSAGES,
+                refresh_interval: 0,
+                no_connect: true,
+                no_history: true,
+                show_system: false,
+            },
+            ServiceUrl::new(DEFAULT_URL),
+            1,
+            PublicConfig {
+                room_id: 1,
+                room_title: "room".to_string(),
+                username: None,
+                room_token_available: true,
+            },
+        );
+        app.add_history(HistoryResult {
+            items: vec![
+                DanmuHistoryEntry {
+                    id: "danmu:1:late:100".to_string(),
+                    payload: r#"{"cmd":"DANMU_MSG","info":[[0,1,25,0,100],"late",[1,"a"],[]]}"#
+                        .to_string(),
+                    received_at: 10_000,
+                    received_seq: 0,
+                    sent_at: Some(100_000),
+                    timeline: Some("2026-04-30 12:00:02".to_string()),
+                },
+                DanmuHistoryEntry {
+                    id: "danmu:2:early:200".to_string(),
+                    payload: r#"{"cmd":"DANMU_MSG","info":[[0,1,25,0,200],"early",[2,"b"],[]]}"#
+                        .to_string(),
+                    received_at: 20_000,
+                    received_seq: 1,
+                    sent_at: Some(200_000),
+                    timeline: Some("2026-04-30 12:00:01".to_string()),
+                },
+            ],
+            recent_loaded: 2,
+            recent_error: None,
+        });
+
+        assert_eq!(app.messages[0].content, "early");
+        assert_eq!(app.messages[0].time, "2026-04-30 12:00:01");
+        assert_eq!(app.messages[1].content, "late");
+        assert_eq!(app.messages[1].time, "2026-04-30 12:00:02");
     }
 
     #[test]

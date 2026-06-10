@@ -153,8 +153,12 @@ function bindUi() {
 
   document.querySelectorAll("[data-collapse]").forEach((header) => {
     header.addEventListener("click", () => {
-      const card = header.closest(".card, .danmu-connect-card");
-      if (card) card.classList.toggle("collapsed");
+      const card = header.closest(".collapsible, .card, .danmu-connect-card");
+      if (!card) return;
+      const collapsed = card.classList.toggle("collapsed");
+      if (header.hasAttribute("aria-expanded")) {
+        header.setAttribute("aria-expanded", String(!collapsed));
+      }
     });
   });
 

@@ -167,21 +167,28 @@ SPDX-License-Identifier: GPL-3.0-or-later
               </div>
               <div class="stream-list" id="stream-list">暂无推流凭证</div>
             </section>
-            <section class="event-feed live-console" aria-label="直播控制台">
+            <section class="event-feed live-console collapsible collapsed" aria-label="直播控制台">
               <div class="feed-header">
                 <h3>控制台</h3>
-                <button class="btn btn-ghost btn-sm" id="clear-live-console" type="button">清空</button>
-              </div>
-              <div class="console-body">
-                <div class="face-auth-panel" id="face-auth-panel" hidden>
-                  <div class="qr-box face-auth-qr" id="face-auth-qr">未生成</div>
-                  <div class="face-auth-copy">
-                    <strong>开播身份验证</strong>
-                    <p class="hint" id="face-auth-status">等待开播返回</p>
-                    <a class="console-link" id="face-auth-link" target="_blank" rel="noreferrer" hidden>打开验证页面</a>
-                  </div>
+                <div class="feed-actions">
+                  <button class="btn btn-ghost btn-sm" type="button" data-collapse="live-console" aria-label="展开或折叠控制台" aria-controls="live-console-body" aria-expanded="false">
+                    <svg class="collapse-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  <button class="btn btn-ghost btn-sm" id="clear-live-console" type="button">清空</button>
                 </div>
-                <pre class="raw-output" id="live-console-output">暂无数据</pre>
+              </div>
+              <div class="collapse-body" id="live-console-body">
+                <div class="console-body">
+                  <div class="face-auth-panel" id="face-auth-panel" hidden>
+                    <div class="qr-box face-auth-qr" id="face-auth-qr">未生成</div>
+                    <div class="face-auth-copy">
+                      <strong>开播身份验证</strong>
+                      <p class="hint" id="face-auth-status">等待开播返回</p>
+                      <a class="console-link" id="face-auth-link" target="_blank" rel="noreferrer" hidden>打开验证页面</a>
+                    </div>
+                  </div>
+                  <pre class="raw-output" id="live-console-output">暂无数据</pre>
+                </div>
               </div>
             </section>
           </section>

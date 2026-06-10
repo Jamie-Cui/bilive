@@ -761,6 +761,15 @@ input:focus, select:focus, textarea:focus {
 
 .live-console { min-height: 260px; }
 
+.live-console.collapsed {
+  grid-template-rows: auto 0;
+  min-height: 0;
+}
+
+.live-console.collapsed .collapse-body {
+  overflow: hidden;
+}
+
 .feed-header {
   display: flex;
   align-items: center;

@@ -51,6 +51,9 @@ enum Command {
     /// Restart the background service.
     Restart(StartArgs),
 
+    /// Open the dashboard in a browser, starting bilive first if needed.
+    Dashboard(StartArgs),
+
     /// Run bilive in the foreground.
     #[command(hide = true)]
     Serve(ServiceArgs),
@@ -127,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Stop(args) => stop(args).await,
         Command::Status(args) => status(args).await,
         Command::Restart(args) => restart(args).await,
+        Command::Dashboard(args) => dashboard(args).await,
         Command::Serve(args) => serve(args).await,
     }
 }
@@ -297,6 +301,37 @@ async fn status(args: StatusArgs) -> anyhow::Result<()> {
 async fn restart(args: StartArgs) -> anyhow::Result<()> {
     stop(args.control.clone()).await?;
     start(args).await
+}
+
+async fn dashboard(args: StartArgs) -> anyhow::Result<()> {
+    let url = dashboard_url(args.service.listen);
+    // `start` is idempotent: it reports an already-running service and returns,
+    // otherwise it launches one and waits for the health check.
+    start(args).await?;
+    open_url(&url)?;
+    println!("opened {url}");
+    Ok(())
+}
+
+fn dashboard_url(listen: SocketAddr) -> String {
+    format!("http://{listen}")
+}
+
+fn open_url(url: &str) -> anyhow::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+
+    ProcessCommand::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch {opener} to open {url}"))?;
+    Ok(())
 }
 
 fn runtime_paths(args: &ControlArgs) -> anyhow::Result<RuntimePaths> {
@@ -633,5 +668,11 @@ mod tests {
     #[test]
     fn process_exists_detects_current_process() {
         assert!(process_exists(std::process::id()).unwrap());
+    }
+
+    #[test]
+    fn dashboard_url_uses_http_scheme_and_listen_addr() {
+        let listen: SocketAddr = "127.0.0.1:22333".parse().unwrap();
+        assert_eq!(dashboard_url(listen), "http://127.0.0.1:22333");
     }
 }

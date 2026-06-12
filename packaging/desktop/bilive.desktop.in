@@ -1,0 +1,14 @@
+# Copyright (C) 2026 Jamie Cui
+# Author: Jamie Cui
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=bilive
+GenericName=Bilibili Live Manager
+Comment=Start the bilive service and open its dashboard
+Exec=@BINDIR@/bilive dashboard
+Terminal=false
+Categories=Network;
+Keywords=bilibili;live;danmu;stream;dashboard;

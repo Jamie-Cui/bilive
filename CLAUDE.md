@@ -114,7 +114,13 @@ it through `UserConfig`/`CachedState` `From`/`apply_to` impls accordingly.
   bypass it. Preserve stream-key redaction in logs and `sanitize_ffmpeg_error`.
 - VTuber control (`/api/vtuber/*`) starts/stops an **external** EasyVtuber
   process via `tokio::process`; bilive owns only the control plane (config,
-  status, start, stop) and never reimplements the Python/GPU runtime.
+  status, start, stop) and never reimplements the Python/GPU runtime. The child
+  process's stdout/stderr are captured to `<cache_dir>/vtuber.log` (truncated per
+  run) and surfaced via `GET /api/vtuber/logs`. `vtuber_command()` and the
+  status `diagnostics` are platform-aware: `spout2` is rejected off Windows, and
+  on Linux only the `debug` (OpenCV window → OBS Window Capture) output works
+  out of the box (`virtual_cam` needs v4l2loopback + a patched EasyVtuber, since
+  upstream hardcodes pyvirtualcam `backend='obs'`).
 
 ## API Surface
 
@@ -129,7 +135,7 @@ it through `UserConfig`/`CachedState` `From`/`apply_to` impls accordingly.
 - Danmu: `/api/danmu/connect`, `/api/danmu/disconnect`, `/api/danmu/messages`,
   `/api/danmu/status`.
 - VTuber: `/api/vtuber/status`, `/api/vtuber/config`, `/api/vtuber/start`,
-  `/api/vtuber/stop`, `/api/vtuber/recommendation`.
+  `/api/vtuber/stop`, `/api/vtuber/logs`, `/api/vtuber/recommendation`.
 - Manager (`/api/manager/*`): room admins, silent users, room silent, blocked
   words, user search, and online rank workflows.
 

@@ -314,6 +314,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 <button class="btn btn-ghost btn-sm" id="refresh-vtuber" type="button">刷新状态</button>
               </div>
               <pre class="raw-output compact-output" id="vtuber-output">暂无数据</pre>
+              <div class="card-header">
+                <h4 class="card-subhead">运行日志</h4>
+                <button class="btn btn-ghost btn-sm" id="refresh-vtuber-log" type="button">刷新日志</button>
+              </div>
+              <pre class="raw-output" id="vtuber-log">暂无日志</pre>
             </section>
 
             <section class="card">
@@ -336,7 +341,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 <label>
                   <span class="label-text">输入</span>
                   <select id="vtuber-input-mode">
-                    <option value="mouse">鼠标/音频</option>
+                    <option value="mouse">鼠标</option>
+                    <option value="mouse_audio">鼠标 + 音频</option>
                     <option value="ifacialmocap">iFacialMocap</option>
                     <option value="openseeface">OpenSeeFace</option>
                     <option value="camera">摄像头</option>
@@ -348,14 +354,21 @@ SPDX-License-Identifier: GPL-3.0-or-later
                   <input id="vtuber-input-address" placeholder="iPhone IP 或 127.0.0.1:11573" />
                 </label>
                 <label>
+                  <span class="label-text">鼠标区域</span>
+                  <input id="vtuber-mouse-region" placeholder="0,0,1920,1080" />
+                </label>
+              </div>
+              <div class="form-grid">
+                <label>
                   <span class="label-text">输出</span>
                   <select id="vtuber-output-mode">
                     <option value="debug">调试窗口</option>
-                    <option value="spout2">Spout2</option>
                     <option value="virtual_cam">OBS 虚拟摄像头</option>
+                    <option value="spout2">Spout2</option>
                   </select>
                 </label>
               </div>
+              <p class="field-hint" id="vtuber-output-hint"></p>
               <div class="form-grid">
                 <label>
                   <span class="label-text">模型</span>
@@ -398,6 +411,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
                   <input id="vtuber-extra-args" placeholder="例如 --alpha_clean --eyebrow" />
                 </label>
               </div>
+            </section>
+
+            <section class="card">
+              <h3>OBS 显示</h3>
+              <div class="architecture-note" id="vtuber-obs-guide">加载中</div>
             </section>
 
             <section class="card">

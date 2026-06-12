@@ -1103,6 +1103,9 @@ fn patch_vtuber_config(config: &mut crate::VtuberConfig, patch: &Value) {
     if let Some(value) = patch.get("input_address").and_then(Value::as_str) {
         config.input_address = value.trim().to_string();
     }
+    if let Some(value) = patch.get("mouse_region").and_then(Value::as_str) {
+        config.mouse_region = value.trim().to_string();
+    }
     if let Some(value) = patch.get("output_mode").and_then(Value::as_str) {
         config.output_mode = value.trim().to_string();
     }
@@ -1405,6 +1408,42 @@ mod tests {
         assert_eq!(reloaded.theme, "dark");
         assert_eq!(reloaded.danmu_notifications.cooldown_secs, 7);
         assert_eq!(reloaded.danmu_notifications.expire_timeout_ms, 5000);
+
+        let _ = tokio::fs::remove_dir_all(parent).await;
+    }
+
+    #[tokio::test]
+    async fn patch_config_round_trips_vtuber_fields() {
+        let path = unique_config_path("patch-vtuber");
+        let parent = path.parent().unwrap().to_path_buf();
+        let store = config_store_for(&path).await;
+        let client = BiliClient::new(store.clone()).unwrap();
+
+        let updated = client
+            .patch_config(json!({
+                "vtuber": {
+                    "enabled": true,
+                    "runtime_dir": "/srv/EasyVtuber",
+                    "input_mode": "mouse_audio",
+                    "mouse_region": "10,20,1280,720",
+                    "output_mode": "virtual_cam",
+                    "frame_rate_limit": 60,
+                }
+            }))
+            .await
+            .unwrap();
+
+        assert!(updated.vtuber.enabled);
+        assert_eq!(updated.vtuber.runtime_dir, "/srv/EasyVtuber");
+        assert_eq!(updated.vtuber.input_mode, "mouse_audio");
+        assert_eq!(updated.vtuber.mouse_region, "10,20,1280,720");
+        assert_eq!(updated.vtuber.output_mode, "virtual_cam");
+        assert_eq!(updated.vtuber.frame_rate_limit, 60);
+
+        let reloaded = config_store_for(&path).await;
+        let reloaded = reloaded.get().await;
+        assert_eq!(reloaded.vtuber.mouse_region, "10,20,1280,720");
+        assert_eq!(reloaded.vtuber.output_mode, "virtual_cam");
 
         let _ = tokio::fs::remove_dir_all(parent).await;
     }

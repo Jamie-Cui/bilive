@@ -110,3 +110,12 @@ Danmu desktop notifications are disabled by default and controlled by
 `danmu_notifications` in config or the web UI. Linux notifications use
 `notify-send`; prefer running `bilive start` from the user session, or use a
 systemd user service, when desktop notifications must reach the compositor.
+
+VTuber control (`/api/vtuber/*`) manages an external EasyVtuber process only.
+The child's stdout/stderr are captured to `<cache_dir>/vtuber.log` (truncated
+per run, exposed via `/api/vtuber/logs`); never send them to `/dev/null`.
+Output-mode handling is platform-aware: reject `spout2` off Windows, and treat
+the `debug` OpenCV window (captured into OBS via Window Capture) as the working
+Linux path. When touching the EasyVtuber command builder, keep the generated
+flags aligned with upstream `src/args.py` and cover them with `vtuber_command`
+unit tests.

@@ -108,7 +108,9 @@ const els = {
   vtuberCharacter: $("#vtuber-character"),
   vtuberInputMode: $("#vtuber-input-mode"),
   vtuberInputAddress: $("#vtuber-input-address"),
+  vtuberMouseRegion: $("#vtuber-mouse-region"),
   vtuberOutputMode: $("#vtuber-output-mode"),
+  vtuberOutputHint: $("#vtuber-output-hint"),
   vtuberModelSelect: $("#vtuber-model-select"),
   vtuberFrameRate: $("#vtuber-frame-rate"),
   vtuberUseTensorrt: $("#vtuber-use-tensorrt"),
@@ -122,6 +124,9 @@ const els = {
   startVtuber: $("#start-vtuber"),
   stopVtuber: $("#stop-vtuber"),
   refreshVtuber: $("#refresh-vtuber"),
+  refreshVtuberLog: $("#refresh-vtuber-log"),
+  vtuberLog: $("#vtuber-log"),
+  vtuberObsGuide: $("#vtuber-obs-guide"),
   vtuberArchitectureNote: $("#vtuber-architecture-note"),
   themeLight: $("#theme-light"),
   themeDark: $("#theme-dark"),
@@ -215,6 +220,7 @@ function bindUi() {
   els.startVtuber.addEventListener("click", () => void withLoading(els.startVtuber, startVtuber));
   els.stopVtuber.addEventListener("click", () => void withLoading(els.stopVtuber, stopVtuber));
   els.refreshVtuber.addEventListener("click", () => void withLoading(els.refreshVtuber, refreshVtuber));
+  els.refreshVtuberLog.addEventListener("click", () => void withLoading(els.refreshVtuberLog, loadVtuberLog));
   [els.themeLight, els.themeDark].forEach((button) => {
     button.addEventListener("click", () => void setTheme(button.dataset.themeValue));
   });
@@ -517,6 +523,7 @@ function vtuberFormConfig() {
     character: els.vtuberCharacter.value.trim() || "lambda_00",
     input_mode: els.vtuberInputMode.value,
     input_address: els.vtuberInputAddress.value.trim(),
+    mouse_region: els.vtuberMouseRegion.value.trim() || "0,0,1920,1080",
     output_mode: els.vtuberOutputMode.value,
     model_select: els.vtuberModelSelect.value.trim() || "v3_seperable_half",
     use_tensorrt: els.vtuberUseTensorrt.checked,
@@ -566,6 +573,7 @@ function renderVtuberConfig(config) {
   els.vtuberCharacter.value = config.character || "lambda_00";
   els.vtuberInputMode.value = config.input_mode || "mouse";
   els.vtuberInputAddress.value = config.input_address || "";
+  els.vtuberMouseRegion.value = config.mouse_region || "0,0,1920,1080";
   els.vtuberOutputMode.value = config.output_mode || "debug";
   els.vtuberModelSelect.value = config.model_select || "v3_seperable_half";
   els.vtuberFrameRate.value = String(clampInteger(config.frame_rate_limit, 1, 240, 30));
@@ -589,19 +597,89 @@ function renderVtuberStatus(status) {
 
   const running = Boolean(status?.running);
   const configured = Boolean(status?.configured);
+  const lastExit = typeof status?.last_exit === "number" ? status.last_exit : null;
+  const exited = !running && configured && lastExit !== null;
   state.vtuberRunning = running;
-  setStatus(els.vtuberStatus, running ? "运行中" : "未启动", running);
-  els.vtuberRuntimeStatus.textContent = running ? `运行中${status.pid ? ` · PID ${status.pid}` : ""}` : configured ? "已配置" : "未配置";
-  els.vtuberRuntimeStatus.className = `status-badge ${running ? "ok" : configured ? "ready" : ""}`;
+  setStatus(els.vtuberStatus, running ? "运行中" : exited ? "已退出" : "未启动", running);
+  els.vtuberRuntimeStatus.textContent = running
+    ? `运行中${status.pid ? ` · PID ${status.pid}` : ""}`
+    : exited
+    ? `已退出 (code ${lastExit})`
+    : configured
+    ? "已配置"
+    : "未配置";
+  els.vtuberRuntimeStatus.className = `status-badge ${running ? "ok" : exited ? "warn" : configured ? "ready" : ""}`;
   els.stopVtuber.disabled = !running;
   els.startVtuber.disabled = running;
   els.vtuberOutput.textContent = JSON.stringify({
     configured,
     running,
     pid: status?.pid || null,
+    last_exit: lastExit,
     command: status?.command || [],
   }, null, 2);
+  renderVtuberDiagnostics(status?.diagnostics);
   renderVtuberRecommendation(status?.recommendation);
+  void loadVtuberLog();
+}
+
+const VTUBER_OUTPUT_LABELS = {
+  debug: "调试窗口",
+  virtual_cam: "OBS 虚拟摄像头",
+  spout2: "Spout2",
+};
+
+function renderVtuberDiagnostics(diagnostics) {
+  if (!diagnostics) {
+    return;
+  }
+  // Gate output options by host OS so users don't pick a mode that can't work.
+  for (const option of els.vtuberOutputMode.options) {
+    let label = VTUBER_OUTPUT_LABELS[option.value] || option.value;
+    let disabled = false;
+    if (option.value === "spout2" && diagnostics.os !== "windows") {
+      disabled = true;
+      label += "（仅 Windows）";
+    } else if (option.value === "virtual_cam" && diagnostics.os === "linux") {
+      label += "（需 v4l2loopback）";
+    }
+    option.textContent = label;
+    option.disabled = disabled;
+  }
+  els.vtuberOutputHint.textContent = diagnostics.output_hint || "";
+  els.vtuberOutputHint.classList.toggle("warn", diagnostics.output_supported === false);
+  renderVtuberObsGuide(diagnostics);
+}
+
+function renderVtuberObsGuide(diagnostics) {
+  const devices = Array.isArray(diagnostics.v4l2_devices) ? diagnostics.v4l2_devices : [];
+  const mode = VTUBER_OUTPUT_LABELS[diagnostics.output_mode] || diagnostics.output_mode || "";
+  const parts = [
+    `<div><strong>当前输出：</strong>${escapeHtml(mode)}（系统 ${escapeHtml(diagnostics.os || "")}）</div>`,
+  ];
+  if (diagnostics.obs_source_hint) {
+    parts.push(`<div><strong>OBS 源：</strong>${escapeHtml(diagnostics.obs_source_hint)}</div>`);
+  }
+  if (diagnostics.os === "linux") {
+    parts.push(`<p><strong>推荐（开箱即用）：</strong>输出选「调试窗口」，OBS 添加「窗口采集 (Xcomposite)」→ 选择窗口 <code>EasyVtuber Debug Frame</code> → 加「色度键/亮度键」抠掉背景并裁剪。</p>`);
+    parts.push(`<p><strong>进阶（虚拟摄像头）：</strong><code>sudo modprobe v4l2loopback exclusive_caps=1 card_label="EasyVtuber"</code>，再在 OBS 添加「视频采集设备 (V4L2)」。注意上游 EasyVtuber 固定使用 backend='obs'，原版可能无法直接写入回环设备。</p>`);
+    parts.push(`<div><strong>检测到的 V4L2 设备：</strong>${devices.length ? escapeHtml(devices.join("、")) : "无"}</div>`);
+  } else if (diagnostics.os === "windows") {
+    parts.push(`<p>Windows：可用 Spout2（OBS 安装 Spout2 插件后添加「Spout2 Capture」）或「OBS 虚拟摄像头」（OBS 视频采集设备）。</p>`);
+  } else if (diagnostics.os === "macos") {
+    parts.push(`<p>macOS：用「OBS 虚拟摄像头」输出后在 OBS 添加视频采集设备；调试窗口可用窗口采集。</p>`);
+  }
+  els.vtuberObsGuide.innerHTML = parts.join("");
+}
+
+async function loadVtuberLog() {
+  try {
+    const result = await api("/api/vtuber/logs");
+    const text = (result?.log || "").trim();
+    els.vtuberLog.textContent = text || "暂无日志";
+  } catch (error) {
+    els.vtuberLog.textContent = "日志不可用";
+  }
 }
 
 function renderVtuberRecommendation(recommendation) {

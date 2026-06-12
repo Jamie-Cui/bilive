@@ -136,6 +136,10 @@ VTuber support is optional and disabled by default. If you never open the
 VTuber tab or start the runtime, bilive runs normally without Python,
 EasyVtuber, GPU drivers, model files, Spout2, or OBS virtual camera support.
 
+bilive only drives the external [EasyVtuber](https://github.com/yuyuyzl/EasyVtuber)
+runtime. For a full deployment and usage walkthrough (installing EasyVtuber,
+configuring bilive, and showing the avatar in OBS), see [VTUBER.md](VTUBER.md).
+
 Prepare an EasyVtuber runtime first. It must be runnable without the
 EasyVtuber wxPython launcher, because bilive starts the core process directly:
 
@@ -150,10 +154,15 @@ In the web UI, open the `VTuber` tab and configure:
 - `Python`: the interpreter for that environment, for example `python`,
   `python.exe`, or a full conda/env path.
 - `角色名`: a PNG name under EasyVtuber `data/images/`, without `.png`.
-- `输入`: `鼠标/音频`, `iFacialMocap`, `OpenSeeFace`, `摄像头`, or `调试输入`.
+- `输入`: `鼠标`, `鼠标 + 音频`, `iFacialMocap`, `OpenSeeFace`, `摄像头`, or
+  `调试输入`.
 - `输入地址`: required for iFacialMocap or OpenSeeFace, such as
   `192.168.1.10:49983` or `127.0.0.1:11573`.
-- `输出`: choose `Spout2`, `OBS 虚拟摄像头`, or `调试窗口`.
+- `鼠标区域`: `x,y,w,h` screen region for mouse input, default `0,0,1920,1080`.
+  Set this for non-1080p or multi-monitor setups (invalid values fall back to
+  the default).
+- `输出`: choose `调试窗口`, `OBS 虚拟摄像头`, or `Spout2`. The UI marks which
+  modes work on the current OS (see the OBS section below).
 - Model, FPS, cache, interpolation, super-resolution, TensorRT, and extra args
   should match the same values you would pass to EasyVtuber.
 
@@ -161,10 +170,40 @@ Click `保存设置` to persist the TOML config. Click `启动形象` only when 
 EasyVtuber environment is ready. Click `停止形象` to terminate the external
 process started by bilive.
 
+The VTuber tab captures the runtime's stdout/stderr to `vtuber.log` under the
+cache directory (`~/.cache/bilive/vtuber.log` by default) and shows the tail
+under `运行日志`, plus the last exit code when the process stops. Check it first
+when `启动形象` appears to do nothing — Python tracebacks, missing dependencies,
+model-not-found, and pyvirtualcam backend errors all surface there.
+
 The backend intentionally does not rewrite EasyVtuber in Rust. bilive owns the
 control plane: config, status, start, and stop. The Python/GPU inference
 runtime remains external because it depends on PyTorch, ONNX Runtime, DirectML,
 TensorRT, OpenCV, Mediapipe, Spout/virtual camera output, and model artifacts.
+
+### Showing the avatar in OBS
+
+EasyVtuber's output modes are not all available on every OS, and bilive's
+`OBS 显示` card reflects what works on the current host:
+
+- **Linux (recommended, works out of the box):** set `输出` to `调试窗口`.
+  EasyVtuber opens an OpenCV window titled `EasyVtuber Debug Frame`. In OBS add a
+  **Window Capture (Xcomposite)** source, pick that window, then add a
+  **Chroma Key / Luma Key** filter to drop the background and crop to the avatar.
+- **Linux (advanced, virtual camera):** load v4l2loopback
+  (`sudo modprobe v4l2loopback exclusive_caps=1 card_label="EasyVtuber"`), set
+  `输出` to `OBS 虚拟摄像头`, and add a **Video Capture Device (V4L2)** source in
+  OBS. Caveat: upstream EasyVtuber hardcodes `pyvirtualcam` `backend='obs'`,
+  which is unavailable on Linux, so the stock runtime may fail to write to the
+  loopback device without a patch — the captured `vtuber.log` will show the
+  pyvirtualcam error if so. Prefer the debug-window path unless you maintain a
+  patched EasyVtuber.
+- **Windows:** `Spout2` (install the OBS Spout2 plugin, add a **Spout2 Capture**
+  source named `EasyVtuber`) or `OBS 虚拟摄像头` (OBS **Video Capture Device**).
+- `Spout2` is rejected on non-Windows hosts with an explanatory message.
+
+For full deployment, usage, and testing steps (including a stub runtime that
+needs no GPU), see [VTUBER.md](VTUBER.md).
 
 ## Configuration
 
@@ -194,6 +233,10 @@ When `XDG_CACHE_HOME` is set, the default cache state path is:
 ```text
 $XDG_CACHE_HOME/bilive/state.json
 ```
+
+The VTuber runtime's stdout/stderr are captured to `vtuber.log` in the same
+cache directory (`~/.cache/bilive/vtuber.log` by default), truncated on each
+`启动形象`.
 
 For compatibility, bilive still reads the previous JSON config shape from the
 selected config path, or the old default `config.json` from the state directory

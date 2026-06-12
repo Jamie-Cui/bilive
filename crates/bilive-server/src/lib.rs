@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     process::{ExitStatus, Stdio},
@@ -39,6 +41,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 const TEST_STREAM_DURATION_SECONDS: u64 = 5;
+const VTUBER_LOG_TAIL_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -54,6 +57,8 @@ struct AppState {
     danmu_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     danmu_log: Arc<Mutex<DanmuHistory>>,
     vtuber_process: Arc<Mutex<Option<VtuberProcess>>>,
+    vtuber_log_path: Arc<PathBuf>,
+    vtuber_last_exit: Arc<Mutex<Option<i32>>>,
     bili: BiliClient,
 }
 
@@ -74,7 +79,9 @@ struct VtuberStatusResponse {
     enabled: bool,
     running: bool,
     pid: Option<u32>,
+    last_exit: Option<i32>,
     command: Vec<String>,
+    diagnostics: VtuberDiagnostics,
     recommendation: VtuberRecommendation,
 }
 
@@ -83,6 +90,25 @@ struct VtuberRecommendation {
     rust_rewrite: &'static str,
     merge_into_bilive: &'static str,
     rationale: Vec<&'static str>,
+}
+
+/// Platform-aware guidance the web UI uses to gate output modes and render the
+/// OBS setup guide. `output_supported` reflects whether the *currently selected*
+/// output mode can work on this host's OS with stock EasyVtuber.
+#[derive(Debug, Serialize)]
+struct VtuberDiagnostics {
+    os: &'static str,
+    output_mode: String,
+    output_supported: bool,
+    output_hint: String,
+    obs_source_hint: String,
+    v4l2_devices: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VtuberLogsResponse {
+    path: String,
+    log: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +243,10 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
             .await
             .context("failed to load config")?;
     let bili = BiliClient::new(store.clone()).context("failed to create bilibili client")?;
+    let cache_dir = config
+        .cache_dir
+        .clone()
+        .unwrap_or_else(bilive_core::config::default_cache_dir);
     let (events, _) = broadcast::channel(1024);
     let danmu_log = Arc::new(Mutex::new(DanmuHistory::default()));
     spawn_danmu_recorder(events.subscribe(), danmu_log.clone());
@@ -226,6 +256,8 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         danmu_task: Arc::new(Mutex::new(None)),
         danmu_log,
         vtuber_process: Arc::new(Mutex::new(None)),
+        vtuber_log_path: Arc::new(cache_dir.join("vtuber.log")),
+        vtuber_last_exit: Arc::new(Mutex::new(None)),
         bili,
     };
 
@@ -282,6 +314,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/vtuber/config", post(save_vtuber_config))
         .route("/api/vtuber/start", post(start_vtuber))
         .route("/api/vtuber/stop", post(stop_vtuber))
+        .route("/api/vtuber/logs", get(vtuber_logs))
         .route("/api/vtuber/recommendation", get(vtuber_recommendation));
 
     let app = match &web_dir {
@@ -1397,13 +1430,19 @@ async fn start_vtuber(
         }
     }
 
+    // Capture the runtime's stdout/stderr to a per-run log so launch failures
+    // (wrong venv, missing deps, model not found, pyvirtualcam backend errors)
+    // are visible in the UI instead of vanishing into /dev/null.
+    let log = open_vtuber_log(state.vtuber_log_path.as_ref())?;
+    let log_for_stderr = log.try_clone().map_err(vtuber_io_error)?;
+
     let mut child = Command::new(&command[0]);
     child
         .args(&command[1..])
         .current_dir(&config.runtime_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_for_stderr))
         .kill_on_drop(false);
 
     let child = child
@@ -1412,6 +1451,7 @@ async fn start_vtuber(
 
     *process = Some(VtuberProcess { child, command });
     drop(process);
+    *state.vtuber_last_exit.lock().await = None;
     Ok(Json(vtuber_status_response(&state).await))
 }
 
@@ -1432,6 +1472,14 @@ async fn vtuber_recommendation() -> Json<VtuberRecommendation> {
     Json(vtuber_architecture_recommendation())
 }
 
+async fn vtuber_logs(State(state): State<AppState>) -> Json<VtuberLogsResponse> {
+    let path = state.vtuber_log_path.as_ref();
+    Json(VtuberLogsResponse {
+        path: path.display().to_string(),
+        log: tail_file(path, VTUBER_LOG_TAIL_BYTES),
+    })
+}
+
 async fn vtuber_status_response(state: &AppState) -> VtuberStatusResponse {
     let config = state.bili.config().await.vtuber;
     let command = vtuber_command(&config).unwrap_or_default();
@@ -1439,6 +1487,7 @@ async fn vtuber_status_response(state: &AppState) -> VtuberStatusResponse {
     let mut running = false;
     let mut pid = None;
     let mut clear_process = false;
+    let mut observed_exit = None;
 
     if let Some(process) = process.as_mut() {
         match process.child.try_wait() {
@@ -1446,7 +1495,11 @@ async fn vtuber_status_response(state: &AppState) -> VtuberStatusResponse {
                 running = true;
                 pid = process.child.id();
             }
-            Ok(Some(_)) | Err(_) => {
+            Ok(Some(status)) => {
+                observed_exit = Some(status.code().unwrap_or(-1));
+                clear_process = true;
+            }
+            Err(_) => {
                 clear_process = true;
             }
         }
@@ -1461,13 +1514,23 @@ async fn vtuber_status_response(state: &AppState) -> VtuberStatusResponse {
         .map(|process| process.command.clone())
         .filter(|_| running)
         .unwrap_or(command);
+    drop(process);
+
+    let mut last_exit_guard = state.vtuber_last_exit.lock().await;
+    if let Some(code) = observed_exit {
+        *last_exit_guard = Some(code);
+    }
+    let last_exit = if running { None } else { *last_exit_guard };
+    drop(last_exit_guard);
 
     VtuberStatusResponse {
         configured: vtuber_is_configured(&config),
         enabled: config.enabled,
         running,
         pid,
+        last_exit,
         command,
+        diagnostics: vtuber_diagnostics(&config),
         recommendation: vtuber_architecture_recommendation(),
     }
 }
@@ -1477,9 +1540,12 @@ fn sanitize_vtuber_config(mut config: VtuberConfig) -> VtuberConfig {
     config.python = non_empty_or(config.python.trim(), "python");
     config.character = non_empty_or(config.character.trim(), "lambda_00");
     config.input_mode = match config.input_mode.as_str() {
-        "ifacialmocap" | "camera" | "debug" | "mouse" | "openseeface" => config.input_mode,
+        "ifacialmocap" | "camera" | "debug" | "mouse" | "mouse_audio" | "openseeface" => {
+            config.input_mode
+        }
         _ => "mouse".to_string(),
     };
+    config.mouse_region = mouse_region(&config.mouse_region);
     config.output_mode = match config.output_mode.as_str() {
         "spout2" | "virtual_cam" | "debug" => config.output_mode,
         _ => "debug".to_string(),
@@ -1514,6 +1580,10 @@ fn vtuber_command(config: &VtuberConfig) -> Result<Vec<String>, ApiError> {
         ));
     }
 
+    if let Some(reason) = vtuber_output_unsupported(&config.output_mode, current_os()) {
+        return Err(ApiError::bad_request(reason));
+    }
+
     let mut args = vec![
         config.python.clone(),
         "-m".to_string(),
@@ -1537,7 +1607,17 @@ fn vtuber_command(config: &VtuberConfig) -> Result<Vec<String>, ApiError> {
                 args.extend(["--osf_input".to_string(), config.input_address.clone()]);
             }
         }
-        _ => args.extend(["--mouse_input".to_string(), "0,0,1920,1080".to_string()]),
+        "mouse_audio" => {
+            args.push("--mouse_audio_input".to_string());
+            args.extend([
+                "--mouse_input".to_string(),
+                mouse_region(&config.mouse_region),
+            ]);
+        }
+        _ => args.extend([
+            "--mouse_input".to_string(),
+            mouse_region(&config.mouse_region),
+        ]),
     }
 
     match config.output_mode.as_str() {
@@ -1569,6 +1649,160 @@ fn ifm_address(value: &str) -> String {
     } else {
         format!("{value}:49983")
     }
+}
+
+fn mouse_region(value: &str) -> String {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    if parts.len() == 4 {
+        if let Ok(values) = parts
+            .iter()
+            .map(|p| p.parse::<i64>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            if values[2] > 0 && values[3] > 0 {
+                return format!("{},{},{},{}", values[0], values[1], values[2], values[3]);
+            }
+        }
+    }
+    "0,0,1920,1080".to_string()
+}
+
+fn current_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+/// Returns an actionable error string when `output_mode` cannot work on `os`
+/// with stock EasyVtuber, or `None` when the combination is allowed.
+fn vtuber_output_unsupported(output_mode: &str, os: &str) -> Option<String> {
+    match output_mode {
+        "spout2" if os != "windows" => Some(
+            "Spout2 仅 Windows 可用；Linux 请选择调试窗口(推荐)或虚拟摄像头(需 v4l2loopback)"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn vtuber_diagnostics(config: &VtuberConfig) -> VtuberDiagnostics {
+    let os = current_os();
+    let output_mode = config.output_mode.clone();
+    let unsupported = vtuber_output_unsupported(&output_mode, os);
+    let v4l2_devices = list_v4l2_devices();
+
+    let (output_hint, obs_source_hint) = match (output_mode.as_str(), os) {
+        ("debug", _) => (
+            "调试窗口输出：EasyVtuber 会打开名为 EasyVtuber Debug Frame 的 OpenCV 窗口。".to_string(),
+            "OBS 添加『窗口采集 (Xcomposite)』，选择窗口 EasyVtuber Debug Frame，再加『色度键/亮度键』抠掉背景并裁剪。".to_string(),
+        ),
+        ("virtual_cam", "linux") => {
+            let devices = if v4l2_devices.is_empty() {
+                "未检测到 v4l2loopback 设备".to_string()
+            } else {
+                v4l2_devices.join("、")
+            };
+            (
+                format!(
+                    "Linux 虚拟摄像头依赖 v4l2loopback；但上游 EasyVtuber 固定用 pyvirtualcam backend='obs'，原版可能无法直接写入回环设备。当前检测到：{devices}。若不可用请改用调试窗口方案。"
+                ),
+                "OBS 添加『视频采集设备 (V4L2)』，选择 v4l2loopback 设备。".to_string(),
+            )
+        }
+        ("virtual_cam", _) => (
+            "虚拟摄像头输出：通过 pyvirtualcam 写入系统虚拟摄像头。".to_string(),
+            "OBS 添加『视频采集设备』，选择 OBS Virtual Camera / 对应虚拟摄像头设备。".to_string(),
+        ),
+        ("spout2", _) => (
+            "Spout2 输出仅 Windows 可用。".to_string(),
+            "OBS 安装 Spout2 插件后添加『Spout2 Capture』源，发送名为 EasyVtuber。".to_string(),
+        ),
+        _ => (String::new(), String::new()),
+    };
+
+    VtuberDiagnostics {
+        os,
+        output_mode,
+        output_supported: unsupported.is_none(),
+        output_hint: unsupported.unwrap_or(output_hint),
+        obs_source_hint,
+        v4l2_devices,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn list_v4l2_devices() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, String)> = entries
+        .flatten()
+        .map(|entry| {
+            let dev = entry.file_name().to_string_lossy().to_string();
+            let name = std::fs::read_to_string(entry.path().join("name"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            (dev, name)
+        })
+        .collect();
+    found.sort();
+    found
+        .into_iter()
+        .map(|(dev, name)| {
+            if name.is_empty() {
+                format!("/dev/{dev}")
+            } else {
+                format!("/dev/{dev} ({name})")
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn list_v4l2_devices() -> Vec<String> {
+    Vec::new()
+}
+
+fn open_vtuber_log(path: &FsPath) -> Result<std::fs::File, ApiError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(vtuber_io_error)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(vtuber_io_error)
+}
+
+fn tail_file(path: &FsPath, max_bytes: u64) -> String {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    // Drop a partial first line when the window started mid-file.
+    if start > 0 {
+        if let Some(idx) = text.find('\n') {
+            text = text[idx + 1..].to_string();
+        }
+    }
+    text
 }
 
 fn apply_interpolation_args(args: &mut Vec<String>, value: &str) {
@@ -1871,6 +2105,146 @@ mod tests {
 
         assert_eq!(recommendation.rust_rewrite, "不建议现在完整重写");
         assert!(recommendation.merge_into_bilive.contains("控制面"));
+    }
+
+    fn temp_runtime_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "bilive-vtuber-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("main.py"), "").unwrap();
+        dir
+    }
+
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    }
+
+    #[test]
+    fn vtuber_command_builds_debug_window_invocation() {
+        let dir = temp_runtime_dir("debug-cmd");
+        let config = bilive_core::VtuberConfig {
+            runtime_dir: dir.to_string_lossy().into_owned(),
+            output_mode: "debug".to_string(),
+            input_mode: "mouse".to_string(),
+            mouse_region: "0,0,1920,1080".to_string(),
+            ..Default::default()
+        };
+
+        let args = vtuber_command(&config).unwrap();
+
+        assert_eq!(args[0], "python");
+        assert_eq!(&args[1..3], ["-m", "src.main"]);
+        assert_eq!(flag_value(&args, "--character"), Some("lambda_00"));
+        assert_eq!(flag_value(&args, "--mouse_input"), Some("0,0,1920,1080"));
+        assert!(args.iter().any(|arg| arg == "--output_debug"));
+        // Default model "v3_seperable_half" expands to these flags.
+        assert_eq!(flag_value(&args, "--model_version"), Some("v3"));
+        assert!(args.iter().any(|arg| arg == "--model_seperable"));
+        assert!(args.iter().any(|arg| arg == "--model_half"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn vtuber_command_maps_mouse_audio_and_region() {
+        let dir = temp_runtime_dir("mouse-audio");
+        let config = bilive_core::VtuberConfig {
+            runtime_dir: dir.to_string_lossy().into_owned(),
+            output_mode: "virtual_cam".to_string(),
+            input_mode: "mouse_audio".to_string(),
+            mouse_region: "10,20,640,480".to_string(),
+            ..Default::default()
+        };
+
+        let args = vtuber_command(&config).unwrap();
+
+        assert!(args.iter().any(|arg| arg == "--mouse_audio_input"));
+        assert_eq!(flag_value(&args, "--mouse_input"), Some("10,20,640,480"));
+        assert!(args.iter().any(|arg| arg == "--output_virtual_cam"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn vtuber_command_maps_model_interpolation_and_super_resolution() {
+        let dir = temp_runtime_dir("model-interp");
+        let config = bilive_core::VtuberConfig {
+            runtime_dir: dir.to_string_lossy().into_owned(),
+            output_mode: "debug".to_string(),
+            model_select: "tha4_student_lambda".to_string(),
+            interpolation: "x4_half".to_string(),
+            super_resolution: "anime4k".to_string(),
+            ..Default::default()
+        };
+
+        let args = vtuber_command(&config).unwrap();
+
+        assert_eq!(flag_value(&args, "--model_version"), Some("v4_student"));
+        assert_eq!(flag_value(&args, "--model_name"), Some("lambda"));
+        assert!(args.iter().any(|arg| arg == "--use_interpolation"));
+        assert!(args.iter().any(|arg| arg == "--interpolation_half"));
+        assert_eq!(flag_value(&args, "--interpolation_scale"), Some("4"));
+        assert!(args.iter().any(|arg| arg == "--use_sr"));
+        assert!(args.iter().any(|arg| arg == "--sr_a4k"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn vtuber_output_unsupported_blocks_spout2_off_windows() {
+        assert!(vtuber_output_unsupported("spout2", "linux").is_some());
+        assert!(vtuber_output_unsupported("spout2", "macos").is_some());
+        assert!(vtuber_output_unsupported("spout2", "windows").is_none());
+        assert!(vtuber_output_unsupported("virtual_cam", "linux").is_none());
+        assert!(vtuber_output_unsupported("debug", "linux").is_none());
+    }
+
+    #[test]
+    fn mouse_region_validates_and_falls_back() {
+        assert_eq!(mouse_region("1,2,3,4"), "1,2,3,4");
+        assert_eq!(mouse_region(" 0 , 0 , 640 , 480 "), "0,0,640,480");
+        assert_eq!(mouse_region("not-a-region"), "0,0,1920,1080");
+        assert_eq!(mouse_region("0,0,-1,5"), "0,0,1920,1080");
+        assert_eq!(mouse_region("0,0,1920,1080,extra"), "0,0,1920,1080");
+    }
+
+    #[test]
+    fn vtuber_diagnostics_debug_recommends_window_capture() {
+        let config = bilive_core::VtuberConfig {
+            output_mode: "debug".to_string(),
+            ..Default::default()
+        };
+        let diagnostics = vtuber_diagnostics(&config);
+
+        assert!(diagnostics.output_supported);
+        assert!(
+            diagnostics
+                .obs_source_hint
+                .contains("EasyVtuber Debug Frame")
+        );
+    }
+
+    #[test]
+    fn tail_file_returns_trailing_window_without_partial_line() {
+        let dir = temp_runtime_dir("tail");
+        let path = dir.join("vtuber.log");
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+
+        let tail = tail_file(&path, 32);
+        assert!(tail.ends_with("line 199\n"));
+        assert!(!tail.contains("line 0\n"));
+        // Window started mid-file, so the first retained line must be complete.
+        assert!(tail.starts_with("line "));
+
+        assert_eq!(tail_file(&dir.join("missing.log"), 32), "");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

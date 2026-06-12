@@ -877,6 +877,11 @@ input:focus, select:focus, textarea:focus {
   color: var(--ok);
 }
 
+.status-badge.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--warn);
+}
+
 .check-row-card {
   align-self: end;
   background: var(--bg-inset);
@@ -899,6 +904,37 @@ input:focus, select:focus, textarea:focus {
 }
 
 .architecture-note p {
+  margin: 0;
+}
+
+.architecture-note code {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 5px;
+}
+
+.field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: -4px 0 0;
+}
+
+.field-hint.warn {
+  color: var(--warn);
+}
+
+.field-hint:empty {
+  display: none;
+}
+
+.card-subhead {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
   margin: 0;
 }
 

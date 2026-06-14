@@ -261,23 +261,20 @@ function switchTab(tab) {
 
 async function refreshAll() {
   try {
-    const [health, auth, danmu, vtuber] = await Promise.all([
+    const [health, auth, danmu] = await Promise.all([
       api("/api/health"),
       api("/api/auth/status"),
       api("/api/danmu/status"),
-      api("/api/vtuber/status").catch((error) => ({ error: error.message })),
     ]);
     setStatus(els.serviceStatus, `v${health.version}`, health.status === "ok");
     state.authenticated = auth.authenticated;
     state.config = auth.config;
     state.danmuConnected = danmu.connected;
-    state.vtuberRunning = Boolean(vtuber.running);
     const configPath = auth.config_path || "默认配置路径";
     const statePath = auth.state_path || "";
     els.configPath.textContent = configPath;
     els.configPath.title = statePath ? `配置：${configPath}\n状态：${statePath}` : configPath;
     renderConfig();
-    renderVtuberStatus(vtuber);
   } catch (error) {
     toast(error.message, true);
   }
